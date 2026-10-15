@@ -1,4 +1,20 @@
+# 当前方案：业务任务服务
+
+已切换到独立业务 API、电脑主动领取任务和本机 Codex stdio 执行。已完成局域网及 ECS 公网 HTTPS 验证，旧 `control/` 中转保持停用。
+
+- [0.3.0 聊天 UI 与交互验证](docs/UI_INTERACTION_VALIDATION.md)
+- [ECS 验证记录](docs/ECS_BUSINESS_VALIDATION.md)
+- [附加型执行器接入实现](docs/ATTACH_TRANSPORT_IMPLEMENTATION.md)
+- [codextest 薄桥原型（并行进行中）](docs/CODEXTEST_THIN_BRIDGE_PROTOTYPE_RUNBOOK.md)
+- [启动与能力边界](business/README.md)
+- [架构决定](docs/adr/001-business-task-architecture.md)
+- [新方案本地验证](docs/BUSINESS_LOCAL_VALIDATION.md)
+
+以下为原直连/旧中转实现资料，不能据此部署公网：
+
 # rmtagt Codex Remote
+
+> **架构调整（2026-10-15）**：现有 `control/` HTTP/WS 中转停止作为远程部署方案，仅保留 loopback 回归；代码拒绝远程 origin 与非 loopback 监听。后续采用业务任务与结果同步，禁止隧道和请求透传，见 [架构决定](docs/adr/001-business-task-architecture.md)。下文服务器部署内容为旧方案记录，不能据此上线；新业务服务与本地验证见上方入口。
 
 Android App 通过统一云端入口，访问 Windows / Mac 上的本机 Codex 历史、创建会话和继续对话。电脑主动连接云端，项目、历史和 Codex 登录态保留在对应电脑。
 
@@ -75,8 +91,12 @@ pwsh -File scripts/test-android.ps1 -CloudConfig .runtime/android-cloud-test.jso
 
 Mac 按 [操作清单](docs/MAC_SETUP.md) 先验证本机，再使用 `mac` 配对码接入云端。云端部署使用 `control/deploy/` 的 Docker、Caddy 和环境配置示例，公网入口必须 HTTPS，服务端口不直接暴露。
 
+尚无云服务器时也可以验证完整链路：保持 `bash scripts/start-mac.sh` 运行，另开终端执行 `node scripts/start-control-local.mjs`，浏览器访问 `http://127.0.0.1:3220`。macOS 默认接入 `mac` 设备，登录信息保存在 `.runtime/control-admin.json`；停止中转使用 `node scripts/stop-control-local.mjs`。
+
 第一版单用户、单云端进程，设备元数据使用原子 JSON 文件和单写入锁；没有引入 SQLite。云端不持久化聊天正文，电脑执行端保存本机请求回执以防重复执行；浏览器在收到确认结果前保留原请求 ID，发生未知结果时只能以相同负载查询原回执，不能当成失败自动重跑。
 
 传输由 TLS 保护，云端进程仍能接触转发内容；第一版未实现端到端加密和 TOTP。电脑休眠后不能接受新任务，Desktop 活跃任务接管不作保证。Windows 的本地验证不代替真实 Mac 和公网部署验收。
 
 旧 Cloudflare 安装脚本保留供原有环境参考，不参与当前中转链路；当前 APK 默认不会打包旧隧道地址。
+
+项目加载与 App 本地置顶：见 [验证说明](docs/PROJECT_CATALOG_VALIDATION.md)。

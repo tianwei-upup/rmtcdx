@@ -2,11 +2,14 @@
 
 - `android/`: Java 原生双主机 WebView 客户端，无第三方运行时依赖。
 - `services/rmtcdx/`: 独立上游 checkout，不把它的 Git 历史并入本项目。
-- `control/`: 自有云端中转与电脑连接客户端；仅允许白名单接口转发到 loopback bridge。
+- `business/`: 当前方案；服务端业务状态、HTTPS 任务领取、Codex stdio 执行、SSE 结果投影，见 `business/README.md`。
+- `control/`: 旧 HTTP/WS 中转，仅限 loopback 回归，禁止公网部署或扩展透传；新方向为服务端业务任务与电脑主动领取，见 `docs/adr/001-business-task-architecture.md`。
 - 上游功能改动导出至 `patches/remote-control.patch`；安装脚本按固定提交幂等应用，不恢复旧的独立补丁。
 - 云端不持久化聊天正文；真实会话验证仅向隔离测试项目发送只读提示词，不修改用户已有活跃会话。
 - `scripts/`: 本机启动、停止、验证和 Android 构建脚本。
-- 服务仅监听 `127.0.0.1:3210`，`CODEX_MODE=real`；禁止静默回退 mock。
+- 远程 Mac 执行器只读发现全部 Codex 本地项目，保留同目录的命名项目；App 项目置顶仅写 WebView localStorage，不修改桌面状态。详见 `docs/PROJECT_CATALOG_VALIDATION.md`。
+- 当前真实 Codex 执行器因运行隔离审计停用；禁止恢复共享桌面 HOME/profile 或继承桌面上下文的启动方式。见 `docs/CODEX_RUNTIME_ISOLATION_AUDIT.md`。
+- 旧直连 bridge 仅监听 `127.0.0.1:3210`。新业务本地验证监听 LAN HTTPS `3230`，ECS 验证使用 HTTPS `443`，详见 `docs/ECS_BUSINESS_VALIDATION.md`；执行器不依赖 bridge HTTP；禁止静默回退 mock。
 - Android 远程地址要求 HTTPS，仅 loopback 和 Android 模拟器地址允许 HTTP。
 - 切换主机保留各自 WebView，不自动刷新正在进行的会话。
 - 不加入 JavaScript 原生桥，不绕过 TLS 错误，不向远程页面暴露本地文件。

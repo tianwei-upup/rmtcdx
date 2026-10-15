@@ -92,7 +92,7 @@ final class DiagnosticLog {
                             "expiresInSeconds", "androidApi").contains(key) && value instanceof Number) {
                         double number = ((Number) value).doubleValue();
                         if (Double.isFinite(number) && number >= -100000 && number <= 1000000000) safe.put(key, (long) number);
-                    } else if (Arrays.asList("redirected", "mainFrame", "clean", "qtCookiePresent").contains(key)
+                    } else if (Arrays.asList("redirected", "mainFrame", "clean", "qtCookiePresent", "cloudCookiePresent").contains(key)
                             && value instanceof Boolean) safe.put(key, value);
                     else if (key.equals("category") && Arrays.asList("cors", "network", "javascript", "other").contains(value))
                         safe.put(key, value);

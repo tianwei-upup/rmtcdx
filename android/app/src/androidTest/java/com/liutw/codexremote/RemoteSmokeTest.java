@@ -101,12 +101,32 @@ public class RemoteSmokeTest extends InstrumentationTestCase {
         return result.get();
     }
     private void click(String text) throws Exception {
-        getInstrumentation().runOnMainSync(() -> {
-            View button = find(activity.getWindow().getDecorView(), Button.class, text);
-            assertNotNull(text, button);
-            button.performClick();
-        });
+        getInstrumentation().runOnMainSync(() -> find(activity.getWindow().getDecorView(), Button.class, "⋮").performClick());
         getInstrumentation().waitForIdleSync();
+        android.view.accessibility.AccessibilityNodeInfo item = null;
+        long until = System.currentTimeMillis() + 5000;
+        while (item == null && System.currentTimeMillis() < until) {
+            android.view.accessibility.AccessibilityNodeInfo root = getInstrumentation().getUiAutomation().getRootInActiveWindow();
+            if (root != null) for (android.view.accessibility.AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(text)) if (text.contentEquals(node.getText() == null ? "" : node.getText())) { item = node; break; }
+            if (item == null) Thread.sleep(100);
+        }
+        assertNotNull(text, item);
+        android.graphics.Rect bounds = new android.graphics.Rect(); item.getBoundsInScreen(bounds);
+        long now = android.os.SystemClock.uptimeMillis();
+        getInstrumentation().sendPointerSync(android.view.MotionEvent.obtain(now, now, 0, bounds.centerX(), bounds.centerY(), 0));
+        getInstrumentation().sendPointerSync(android.view.MotionEvent.obtain(now, now + 50, 1, bounds.centerX(), bounds.centerY(), 0));
+        getInstrumentation().waitForIdleSync();
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline) {
+            AtomicReference<String> current = new AtomicReference<>("");
+            getInstrumentation().runOnMainSync(() -> {
+                WebView visible = (WebView) find(activity.getWindow().getDecorView(), WebView.class, null);
+                current.set(visible == null ? "" : visible.getOriginalUrl());
+            });
+            if (current.get() != null && current.get().endsWith("/devices/" + text.toLowerCase(java.util.Locale.ROOT) + "/")) return;
+            Thread.sleep(50);
+        }
+        fail("Host navigation did not complete: " + text);
     }
     @Override protected void tearDown() throws Exception {
         if (activity != null) getInstrumentation().runOnMainSync(() -> activity.finish());

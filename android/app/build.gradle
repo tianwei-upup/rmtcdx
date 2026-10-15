@@ -16,8 +16,8 @@ android {
         applicationId 'com.liutw.codexremote'
         minSdk 26
         targetSdk 34
-        versionCode 4
-        versionName '0.2.0'
+        versionCode 5
+        versionName '0.3.0'
         buildConfigField 'String', 'DEFAULT_WINDOWS_URL', groovy.json.JsonOutput.toJson(defaultWindowsUrl)
         testInstrumentationRunner 'android.test.InstrumentationTestRunner'
     }
@@ -26,4 +26,5 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
     buildFeatures { buildConfig true }
+    sourceSets { debug { res.srcDir 'build/localTlsRes' } }
 }

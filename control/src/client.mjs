@@ -4,12 +4,12 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
-import { MAX_BODY, MAX_RESPONSE, MAX_FRAME, hash, validId, validRequestId, trustedUrl, allowedApi, sendFrame, readBody, Store } from './common.mjs';
+import { MAX_BODY, MAX_RESPONSE, MAX_FRAME, hash, validId, validRequestId, localRelayUrl, allowedApi, allowedUpload, imageContentType, sendFrame, readBody, readBytes, Store } from './common.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const jsonBody = value => JSON.stringify(value);
 export async function pairDevice({ serverUrl, deviceId, code, configFile }) {
-  const base = trustedUrl(serverUrl);
+  const base = localRelayUrl(serverUrl);
   if (!validId(deviceId) || typeof code !== 'string' || code.length < 32) throw new Error('Valid device ID and pairing code required');
   const response = await fetch(new URL('/api/pair', base), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ deviceId, code }), signal: AbortSignal.timeout(15_000), redirect: 'error' });
   const result = await response.json();
@@ -25,7 +25,7 @@ export async function pairDevice({ serverUrl, deviceId, code, configFile }) {
 }
 
 export function createClient(options) {
-  const base = trustedUrl(options.serverUrl);
+  const base = localRelayUrl(options.serverUrl);
   if (!validId(options.deviceId) || typeof options.token !== 'string' || options.token.length < 32) throw new Error('Invalid client configuration');
   const bridgePort = options.bridgePort ?? Number(process.env.RMT_BRIDGE_PORT ?? 3210);
   if (!Number.isInteger(bridgePort) || bridgePort < 1 || bridgePort > 65535) throw new Error('Invalid bridge port');
@@ -43,6 +43,8 @@ export function createClient(options) {
   let bridgeTimer;
   let attempt = 0;
   let activeReads = 0;
+  let activeHistoryReads = 0;
+  let activeCatalogReads = 0;
   let activeWrites = 0;
   const readQueue = [];
   const abort = new AbortController();
@@ -51,6 +53,10 @@ export function createClient(options) {
   let eventBytes = 0;
   const events = [];
   const status = options.onStatus ?? (() => {});
+  // Large catalog/history reads must leave one slot for run polling and health.
+  const priorityRead = message => message.path === '/healthz' || /^\/api\/runs\/[a-zA-Z0-9_-]+$/.test(message.path);
+  const catalogRead = message => /^\/api\/(?:repos|sessions(?:\/search)?)(?:\?|$)/.test(message.path);
+  const canRead = message => activeReads < 4 && (priorityRead(message) || activeHistoryReads < 3) && (!catalogRead(message) || activeCatalogReads < 2);
   function respond(current, message, result) {
     if (relay !== current || current.readyState !== 1) return;
     let frame = { type: 'response', id: message.id, ...result };
@@ -67,18 +73,22 @@ export function createClient(options) {
   }
   function pumpReads() {
     while (activeReads < 4 && readQueue.length) {
-      const queued = readQueue.shift();
+      let index = readQueue.findIndex(queued => priorityRead(queued.message));
+      if (index < 0) index = readQueue.findIndex(queued => !catalogRead(queued.message) && canRead(queued.message));
+      if (index < 0) index = readQueue.findIndex(queued => canRead(queued.message));
+      if (index < 0) break;
+      const [queued] = readQueue.splice(index, 1);
       clearTimeout(queued.timer);
       if (relay === queued.current && queued.current.readyState === 1 && !stopping) dispatch(queued.current, queued.message);
     }
   }
   function dispatch(current, message) {
     const read = message.method === 'GET';
-    if (read) activeReads++; else activeWrites++;
+    if (read) { activeReads++; if (!priorityRead(message)) activeHistoryReads++; if (catalogRead(message)) activeCatalogReads++; } else activeWrites++;
     void execute(message).then(result => respond(current, message, result)).catch(() => {
       respond(current, message, { status: 503, body: jsonBody({ message: read ? 'Read request failed' : 'Operation outcome unknown; inspect local state before retry', state: read ? 'error' : 'unknown', requestId: message.requestId }) });
     }).finally(() => {
-      if (read) { activeReads--; pumpReads(); } else activeWrites--;
+      if (read) { activeReads--; if (!priorityRead(message)) activeHistoryReads--; if (catalogRead(message)) activeCatalogReads--; pumpReads(); } else activeWrites--;
     });
   }
   function schedule(current, message) {
@@ -88,7 +98,7 @@ export function createClient(options) {
       return;
     }
     message.body = ''; // GET bodies are unused and must not consume queue capacity.
-    if (activeReads < 4 && !readQueue.length) return dispatch(current, message);
+    if (canRead(message) && (priorityRead(message) || !catalogRead(message) || !readQueue.length)) return dispatch(current, message);
     if (readQueue.length >= 64) return respond(current, message, { status: 429, body: jsonBody({ message: 'Device read queue full; no request dispatched', state: 'busy' }) });
     const queued = { current, message };
     queued.timer = setTimeout(() => {
@@ -185,7 +195,13 @@ export function createClient(options) {
       // Native HTTP bypasses OS/environment proxy settings for the loopback bridge.
       return await new Promise((resolve, reject) => {
         const request = http.request(bridgeOrigin + message.path, { method: message.method, headers: { 'content-type': 'application/json', 'x-request-id': message.requestId }, signal: AbortSignal.any([AbortSignal.timeout(options.bridgeTimeoutMs ?? 30_000), abort.signal]) }, async response => {
-          try { resolve({ status: response.statusCode, body: await readBody(response, MAX_RESPONSE) }); }
+          try {
+            if (allowedUpload(message.path) && response.statusCode === 200) {
+              const contentType = imageContentType(response.headers['content-type']);
+              if (!contentType) { response.resume(); return resolve({ status: 502, body: jsonBody({ message: 'Bridge returned an unsupported image type' }) }); }
+              resolve({ status: 200, body: (await readBytes(response, MAX_RESPONSE)).toString('base64'), encoding: 'base64', contentType });
+            } else resolve({ status: response.statusCode, body: await readBody(response, MAX_RESPONSE) });
+          }
           catch (error) { reject(error); }
         });
         request.on('error', reject);
@@ -203,7 +219,7 @@ export function createClient(options) {
     if (previous) {
       if (previous.fingerprint !== fingerprint) return { status: 409, body: jsonBody({ message: 'Request ID reused for different operation', state: 'conflict' }) };
       if (inflight.has(message.requestId)) return inflight.get(message.requestId);
-      return previous.result ?? { status: 409, body: jsonBody({ message: 'Previous operation outcome unknown; manual reconciliation required', state: 'unknown', requestId: message.requestId }) };
+      return previous.result ? { ...previous.result, receipt: 'complete' } : { status: 409, body: jsonBody({ message: 'Previous operation outcome unknown; manual reconciliation required', state: 'unknown', requestId: message.requestId }) };
     }
     if (bridgeMode !== 'real') return { status: 503, body: jsonBody({ message: 'Local bridge is not connected in real mode; no command executed', state: 'offline' }) };
     if (Object.keys(store.data.receipts).length >= 10000) return { status: 507, body: jsonBody({ message: 'Receipt store full; no command executed. Manual receipt archival required.' }) };
@@ -219,6 +235,7 @@ export function createClient(options) {
         store.data.receipts[message.requestId].state = 'complete';
         store.data.receipts[message.requestId].result = result;
         store.save();
+        return { ...result, receipt: 'complete' };
       } else {
         result.status = 503;
         result.body = jsonBody({ message: 'Operation outcome unknown; manual reconciliation required', state: 'unknown', requestId: message.requestId });

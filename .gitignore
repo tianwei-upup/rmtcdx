@@ -7,6 +7,14 @@ android/local.properties
 android/**/build/
 *.iml
 .idea/
+.DS_Store
 artifacts/
 .archify/
 .scratch/
+.playwright-cli/
+output/playwright/
+
+# Independent business application build output
+business/dist/
+
+business/node_modules/

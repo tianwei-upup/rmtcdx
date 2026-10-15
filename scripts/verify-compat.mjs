@@ -10,6 +10,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const base = process.env.RMT_TEST_BASE ?? 'http://127.0.0.1:3210';
 const origin = new URL(base).origin;
 const proxied = new URL(base).pathname.startsWith('/devices/');
+const platformLabel = process.platform === 'darwin' ? 'MAC' : 'WINDOWS';
+const markers = [`RMTAGT_${platformLabel}_NEW_OK`, `RMTAGT_${platformLabel}_RESUME_OK`];
 let cookie = '';
 if (proxied) {
   const credentials = JSON.parse(fs.readFileSync(path.join(root, '.runtime/control-admin.json'), 'utf8'));
@@ -54,7 +56,7 @@ try {
     const fileBefore = fs.readFileSync(fixture, 'utf8');
     const { session } = await api('/api/sessions', { repoId: 'rmtagt-compat' });
     assert.ok(session.id);
-    for (const marker of ['RMTAGT_WINDOWS_NEW_OK', 'RMTAGT_WINDOWS_RESUME_OK']) {
+    for (const marker of markers) {
       const { run } = await api('/api/runs', { sessionId: session.id, prompt: `只回复 ${marker}。不要使用工具，不要读取或修改文件，不要执行命令。`, codex: { sandbox: 'read-only', approvalPolicy: 'on-request' } });
       assert.equal(run.sessionId, session.id);
       const until = Date.now() + 120000;
@@ -65,22 +67,24 @@ try {
       } while (['running', 'queued'].includes(latest.status) && Date.now() < until);
       assert.equal(latest.status, 'completed', `Run ended as ${latest.status}`);
     }
-    const title = `rmtagt ${process.platform === 'darwin' ? 'Mac' : 'Windows'} compatibility`;
+    const title = `rmtagt ${process.platform === 'darwin' ? 'Mac' : 'Windows'} compatibility ${session.id.slice(-8)}`;
     const renamed = await api(`/api/sessions/${session.id}`, { title }, 'PATCH');
     assert.equal(renamed.session.title, title, 'Rename must be visible in subsequent reads');
     assert.equal((await api(`/api/sessions/${session.id}`)).session.repoId, 'rmtagt-compat', 'Fixture must remain in its own workspace');
     const messages = (await api(`/api/sessions/${session.id}/messages`)).messages;
-    for (const marker of ['RMTAGT_WINDOWS_NEW_OK', 'RMTAGT_WINDOWS_RESUME_OK']) assert.ok(messages.some(m => m.role === 'assistant' && m.text.includes(marker)));
+    for (const marker of markers) assert.ok(messages.some(m => m.role === 'assistant' && m.text.includes(marker)));
     assert.equal((await api(`/api/sessions/${session.id}/select`, {})).session.id, session.id);
     assert.ok(Array.isArray((await api(`/api/sessions/${session.id}/codex/requests`)).requests));
     assert.ok(events.some(e => e.type === 'message.delta' && e.sessionId === session.id));
     assert.ok(events.some(e => e.type === 'run.completed' && e.run.sessionId === session.id));
     assert.equal(fs.readFileSync(fixture, 'utf8'), fileBefore);
     const result = { result: 'PASS', real: true, viaCloud: proxied, historyCount: before.sessions.length, historyRead, sessionId: session.id, fixtureTitle: title, completedTurns: 2, streamingEvents: events.filter(e => e.type === 'message.delta' && e.sessionId === session.id).length, fixtureUnchanged: true };
-    fs.writeFileSync(path.join(root, `.runtime/${proxied ? 'cloud' : 'windows'}-compat-result.json`), JSON.stringify(result, null, 2));
+    fs.writeFileSync(path.join(root, `.runtime/${proxied ? 'cloud' : platformLabel.toLowerCase()}-compat-result.json`), JSON.stringify(result, null, 2), { mode: 0o600 });
     if (proxied) {
       const credentials = JSON.parse(fs.readFileSync(path.join(root, '.runtime/control-admin.json'), 'utf8'));
-      fs.writeFileSync(path.join(root, '.runtime/android-cloud-test.json'), JSON.stringify({ cloudUrl: origin, ...credentials, fixtureTitle: title }), { mode: 0o600 });
+      fs.writeFileSync(path.join(root, '.runtime/android-cloud-test.json'), JSON.stringify({ cloudUrl: origin, ...credentials,
+        deviceId: new URL(base).pathname.split('/')[2], fixtureSessionId: session.id, fixtureTitle: title,
+        markerSuffix: '_' + Date.now() }), { mode: 0o600 });
     }
     console.log(JSON.stringify(result));
   }

@@ -1,0 +1,33 @@
+[Unit]
+Description=Rmtagt business task API (no network relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rmtagt-business
+Group=rmtagt-business
+WorkingDirectory=/opt/rmtagt-business/current/business
+EnvironmentFile=/etc/rmtagt-business/service.env
+ExecStart=/opt/rmtagt-node/current/bin/node src/server.mjs
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=35
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/rmtagt-business
+UMask=0077
+LimitNOFILE=4096
+MemoryMax=512M
+MemorySwapMax=0
+LimitCORE=0
+TasksMax=64
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

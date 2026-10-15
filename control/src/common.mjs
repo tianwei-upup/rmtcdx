@@ -20,11 +20,20 @@ export function trustedUrl(value, protocols = ['https:']) {
   if (!protocols.includes(url.protocol) && !(local && url.protocol === 'http:')) throw new Error('HTTPS required except loopback');
   return url;
 }
+// This legacy protocol encapsulates HTTP/WS traffic. It must not be deployed remotely.
+export function localRelayUrl(value) {
+  const url = trustedUrl(value);
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
+    throw new Error('Legacy traffic relay is limited to loopback validation. Remote access requires the business-task architecture.');
+  }
+  return url;
+}
 export function allowedApi(method, input) {
   let url;
   try { url = new URL(input, 'http://bridge'); } catch { return false; }
   if (url.origin !== 'http://bridge' || input.includes('\\') || /%2f|%5c|%2e/i.test(input)) return false;
   const p = url.pathname;
+  if (method === 'GET' && allowedUpload(input)) return true;
   const id = '[a-zA-Z0-9_-]+';
   const patterns = {
     GET: ['account/rate-limits', 'codex/models', 'notifications/config', 'repos', `repos/${id}`, 'sessions', 'sessions/search', `sessions/${id}`, `sessions/${id}/messages`, `sessions/${id}/codex/requests`, `runs/${id}`],
@@ -33,6 +42,17 @@ export function allowedApi(method, input) {
   };
   return (patterns[method] ?? []).some(pattern => new RegExp(`^/api/${pattern}$`).test(p));
 }
+// Only bridge-owned upload batches; never arbitrary local paths or nested files.
+export function allowedUpload(input) {
+  if (typeof input !== 'string' || input.includes('?') || input.includes('#') || input.includes('\\')) return false;
+  const match = /^\/api\/uploads\/upload_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\/([^/]{1,1024})$/.exec(input);
+  if (!match) return false;
+  try {
+    const name = decodeURIComponent(match[1]);
+    return /^\d+-/.test(name) && !/[\/\\\u0000-\u001f\u007f]/.test(name) && !/%[a-f0-9]{2}/i.test(name);
+  } catch { return false; }
+}
+export const imageContentType = value => typeof value === 'string' && /^image\/(?:png|jpeg|webp|gif|svg\+xml|avif|heic|heif|bmp|x-icon|vnd\.microsoft\.icon)$/i.test(value.split(';')[0].trim()) ? value.split(';')[0].trim().toLowerCase() : null;
 export function sendFrame(ws, frame) {
   if (ws.readyState !== 1) return false;
   const data = typeof frame === 'string' ? frame : JSON.stringify(frame);
@@ -45,6 +65,9 @@ export function json(res, code, value, headers = {}) {
   res.end(JSON.stringify(value));
 }
 export async function readBody(req, max = MAX_BODY) {
+  return (await readBytes(req, max)).toString('utf8');
+}
+export async function readBytes(req, max = MAX_RESPONSE) {
   let size = 0;
   const chunks = [];
   // Keep the HTTP connection alive long enough to return an explicit 413.
@@ -53,7 +76,7 @@ export async function readBody(req, max = MAX_BODY) {
     if (size > max) { req.resume(); throw Object.assign(new Error('Payload too large'), { status: 413 }); }
     chunks.push(chunk);
   }
-  return Buffer.concat(chunks).toString('utf8');
+  return Buffer.concat(chunks);
 }
 // Single-process store. Lock prevents accidentally running two writers against one file.
 export class Store {

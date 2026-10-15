@@ -4,14 +4,14 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { MAX_RESPONSE, MAX_FRAME, hash, secret, validId, validRequestId, equalSecret, trustedUrl, allowedApi, sendFrame, json, readBody, Store } from './common.mjs';
+import { MAX_RESPONSE, MAX_FRAME, hash, secret, validId, validRequestId, equalSecret, localRelayUrl, allowedApi, allowedUpload, imageContentType, sendFrame, json, readBody, Store } from './common.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_STATIC = path.resolve(HERE, '../../services/rmtcdx/apps/bridge/web-dist');
 const DEVICE_PATH = /^\/devices\/([a-zA-Z0-9_-]{1,80})(\/.*)?$/;
 
 export async function createCloud(options = {}) {
-  const origin = trustedUrl(options.publicUrl ?? process.env.RMT_PUBLIC_URL ?? 'http://127.0.0.1:3220').origin;
+  const origin = localRelayUrl(options.publicUrl ?? process.env.RMT_PUBLIC_URL ?? 'http://127.0.0.1:3220').origin;
   const username = options.username ?? process.env.RMT_ADMIN_USERNAME ?? 'admin';
   const password = options.password ?? process.env.RMT_ADMIN_PASSWORD;
   const passwordHash = options.passwordHash ?? process.env.RMT_ADMIN_PASSWORD_HASH;
@@ -152,7 +152,7 @@ export async function createCloud(options = {}) {
             pending.delete(id);
             json(res, 504, { message: mutation ? 'Operation outcome unknown; retry with the same request ID' : 'Device request timed out', state: mutation ? 'unknown' : 'timeout', requestId });
           }, timeoutMs);
-          pending.set(id, { res, timer, deviceId, generation: device.generation, mutation, requestId });
+          pending.set(id, { res, timer, deviceId, generation: device.generation, mutation, requestId, image: allowedUpload(route + url.search) });
           res.on('close', () => { if (pending.has(id)) { clearTimeout(timer); pending.delete(id); } });
           res.setHeader('x-request-id', requestId);
           if (!sendFrame(device.socket, { type: 'http', id, requestId, method, path: route + url.search, body })) { clearTimeout(timer); pending.delete(id); return json(res, 503, { message: 'Device unavailable', state: 'unknown', requestId }); }
@@ -245,14 +245,24 @@ export async function createCloud(options = {}) {
           const p = pending.get(msg.id);
           if (!p || p.deviceId !== deviceId || p.generation !== d.generation) return;
           if (!Number.isInteger(msg.status) || msg.status < 200 || msg.status > 599 || typeof msg.body !== 'string') return ws.close(1008, 'Invalid response');
-          if (Buffer.byteLength(msg.body) > MAX_RESPONSE) {
+          let body = msg.body;
+          let contentType = 'application/json; charset=utf-8';
+          if (msg.encoding !== undefined) {
+            if (!p.image || msg.status !== 200 || msg.encoding !== 'base64' || !imageContentType(msg.contentType)) return ws.close(1008, 'Invalid binary response');
+            body = Buffer.from(msg.body, 'base64');
+            if (body.toString('base64') !== msg.body) return ws.close(1008, 'Invalid base64 response');
+            contentType = imageContentType(msg.contentType);
+          } else if (p.image && msg.status === 200) return ws.close(1008, 'Image response requires binary encoding');
+          if (Buffer.byteLength(body) > MAX_RESPONSE) {
             clearTimeout(p.timer); pending.delete(msg.id);
             json(p.res, p.mutation ? 503 : 413, { message: 'Bridge response exceeds 32 MiB limit', state: p.mutation ? 'unknown' : 'too_large', limitBytes: MAX_RESPONSE, requestId: p.requestId });
             return;
           }
           clearTimeout(p.timer); pending.delete(msg.id);
-          p.res.writeHead(msg.status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-request-id': p.requestId });
-          p.res.end(msg.body);
+          p.res.writeHead(msg.status, { 'content-type': contentType, 'cache-control': 'no-store', 'x-request-id': p.requestId,
+            ...(p.mutation && msg.receipt === 'complete' ? { 'x-rmtagt-receipt': 'complete' } : {}),
+            ...(p.image ? { 'content-security-policy': "default-src 'none'; sandbox", 'content-disposition': 'inline' } : {}) });
+          p.res.end(body);
         } else if (msg.type === 'event') {
           if (!validId(msg.epoch) || !Number.isSafeInteger(msg.seq) || msg.seq < 1 || !msg.event || typeof msg.event.type !== 'string') return ws.close(1008, 'Invalid event');
           if (d.epoch !== msg.epoch) { d.epoch = msg.epoch; d.lastSeq = 0; d.events = []; d.eventBytes = 0; broadcast(d, { type: 'backend.degraded', reason: 'relay.snapshot-required: agent restarted' }); }
@@ -286,7 +296,10 @@ export async function createCloud(options = {}) {
   return {
     server,
     origin,
-    listen: (port = Number(process.env.RMT_PORT ?? 3220), host = process.env.RMT_HOST ?? '127.0.0.1') => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve(server.address()); }); }),
+    listen: (port = Number(process.env.RMT_PORT ?? 3220), host = process.env.RMT_HOST ?? '127.0.0.1') => new Promise((resolve, reject) => {
+      if (!['127.0.0.1', 'localhost', '::1'].includes(host)) return reject(new Error('Legacy relay may only listen on loopback'));
+      server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve(server.address()); });
+    }),
     async close() {
       if (closed) return; closed = true;
       clearInterval(heartbeat);

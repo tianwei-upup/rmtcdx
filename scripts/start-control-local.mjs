@@ -4,10 +4,14 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { pairDevice } from '../control/src/client.mjs';
+import { validId } from '../control/src/common.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runtime = path.join(root, '.runtime');
 const base = 'http://127.0.0.1:3220';
+const deviceId = process.env.RMT_LOCAL_DEVICE_ID ?? (process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'local');
+if (!validId(deviceId)) throw new Error('Invalid RMT_LOCAL_DEVICE_ID');
+const deviceName = deviceId === 'mac' ? '本机 Mac' : deviceId === 'windows' ? '本机 Windows' : deviceId;
 fs.mkdirSync(runtime, { recursive: true });
 if (await fetch(`${base}/healthz`).then(() => true, () => false)) throw new Error('Port 3220 is occupied; stop the existing control service first.');
 const health = await fetch('http://127.0.0.1:3210/healthz').then(r => r.json());
@@ -41,24 +45,24 @@ try {
   const login = await fetch(`${base}/api/login`, { method: 'POST', headers: { Origin: base, 'Content-Type': 'application/json' }, body: JSON.stringify(credentials) });
   if (!login.ok) throw new Error('Local cloud login failed');
   const cookie = login.headers.get('set-cookie').split(';')[0];
-  const response = await fetch(`${base}/api/pairing`, { method: 'POST', headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ deviceId: 'windows', name: '家庭 Windows' }) });
+  const response = await fetch(`${base}/api/pairing`, { method: 'POST', headers: { Origin: base, Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ deviceId, name: deviceName }) });
   const pairing = await response.json();
   if (!response.ok) throw new Error(pairing.message);
-  const configFile = path.join(runtime, 'windows-client.json');
-  await pairDevice({ serverUrl: base, deviceId: 'windows', code: pairing.code, configFile });
-  launch('windows-client', path.join(root, 'control/src/client.mjs'), { RMT_CLIENT_CONFIG: configFile });
+  const configFile = path.join(runtime, `${deviceId}-client.json`);
+  await pairDevice({ serverUrl: base, deviceId, code: pairing.code, configFile });
+  launch(`${deviceId}-client`, path.join(root, 'control/src/client.mjs'), { RMT_CLIENT_CONFIG: configFile });
   fs.writeFileSync(path.join(runtime, 'control-processes.json'), JSON.stringify(children, null, 2));
   for (let i = 0; i < 60; i++) {
-    const response = await fetch(`${base}/devices/windows/healthz`, { headers: { Cookie: cookie } });
+    const response = await fetch(`${base}/devices/${deviceId}/healthz`, { headers: { Cookie: cookie } });
     const value = await response.json();
     if (response.ok && value.codex?.mode === 'real' && value.codex?.ready) {
-      console.log(`PASS: local cloud -> Windows client -> real Codex at ${base}`);
+      console.log(`PASS: local cloud -> ${deviceName} client -> real Codex at ${base}/devices/${deviceId}/`);
       console.log('Login credentials: .runtime/control-admin.json (not printed)');
       process.exit(0);
     }
     await new Promise(r => setTimeout(r, 250));
   }
-  throw new Error('Windows relay did not become ready');
+  throw new Error('Local device relay did not become ready');
 } catch (error) {
   for (const child of children.reverse()) { try { process.kill(child.pid); } catch {} }
   throw error;

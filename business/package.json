@@ -1,0 +1,19 @@
+{
+  "name": "rmtagt-business",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "agent": "node src/agent.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/server.mjs && node --check src/agent.mjs && node --check src/attach-adapter.mjs && node --check src/attach-client.mjs && node --check web/app.js",
+    "build": "node scripts/build.mjs"
+  },
+  "devDependencies": {
+    "@phosphor-icons/core": "2.1.1"
+  }
+}

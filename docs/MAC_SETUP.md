@@ -1,5 +1,7 @@
 # Mac 接入和兼容性验证
 
+> 2026-10-15 架构调整：本页中转接入步骤只保留为旧方案本地回归说明，停止作为远程部署指引。旧本地中转与荣耀 USB 映射已停止；新方案按 [ADR 001](adr/001-business-task-architecture.md) 改为业务任务和结果同步，尚未实现。
+
 Mac 需要由平时使用 Codex Desktop 的同一个系统用户运行 bridge 和 rmtagt 客户端。项目和历史继续保留在 Mac；Windows 的验证结果不能代替 Mac 验收。
 
 ## 你需要准备
@@ -32,6 +34,39 @@ node scripts/verify-compat.mjs --run
 然后用 Mac 浏览器打开 `http://127.0.0.1:3210`，找到一条你认识的、已经结束的 Desktop 会话，核对末尾消息。若要进一步验证该原有会话续聊，只发送“请只回复 MAC_DESKTOP_RESUME_OK，不要使用工具、不要读写文件、不要执行命令”，确认回复正常；不要选择正在执行的会话。
 
 ## 连接云端
+
+没有云服务器时，先在本机验证完整中转链路。保持 `start-mac.sh` 运行，在项目根目录另开终端：
+
+```bash
+node scripts/start-control-local.mjs
+RMT_TEST_BASE=http://127.0.0.1:3220/devices/mac node scripts/verify-compat.mjs --run
+```
+
+浏览器打开 `http://127.0.0.1:3220`，使用 `.runtime/control-admin.json` 内的本地登录信息。启动器在 macOS 默认绑定 `mac`，Windows 默认绑定 `windows`；可通过 `RMT_LOCAL_DEVICE_ID` 覆盖。登录信息、设备凭据和测试记录均在 Git 忽略的 `.runtime/` 内，不要提交或分享。
+
+停止本地中转及电脑连接客户端：`node scripts/stop-control-local.mjs`。bridge 在其启动终端按 Ctrl-C 停止；这会结束该 bridge 发起的活动任务。本地 HTTP 验证不代表公网 HTTPS/WSS 或 Android 真机已通过。
+
+Mac 构建 Android 时使用 JDK 17 或 21 和 Android SDK，进入 `android/` 执行 `bash gradlew --no-daemon assembleDebug lintDebug`；较新的 Android Studio JBR 可能是 JDK 25，不能直接用于 Gradle 8.9。
+
+### USB 真机验证
+
+先在 `android/` 构建 `assembleDebug assembleDebugAndroidTest lintDebug`，再在仓库根目录明确指定设备，避免误装到另一台连接中的手机：
+
+```bash
+node scripts/test-android-local.mjs --device <adb序列号>
+```
+
+上面执行原生配置与 WebView 保持测试。完整本地中转测试先执行 `RMT_TEST_BASE=http://127.0.0.1:3220/devices/mac node scripts/verify-compat.mjs --run`，生成包含唯一隔离会话 ID、标题、Mac 入口与本地登录信息的 `.runtime/android-cloud-test.json`，然后执行：
+
+```bash
+node scripts/test-android-local.mjs --device <adb序列号> --config .runtime/android-cloud-test.json
+```
+
+配置中的 `imagePath` 可选，必须指向当前设备 `/devices/mac/api/uploads/upload_<UUID>/...` 的已知测试图片，测试期望解码尺寸为 1×1。`reconnectCheck: true` 可选，在两轮真实发送结束后停止并恢复本项目电脑客户端，检查离线提示、重连和会话保持，不切换手机网络。
+
+脚本通过标准输入写入 App 私有测试配置，结束时删除；测试输出与截图保存在 `.runtime/<adb序列号>-local/`。配置含登录信息，禁止分享或提交。Windows 继续使用 `scripts/test-android.ps1`；本地中转的断线注入仅支持 macOS/Linux。
+
+### 使用真实服务器
 
 云端部署并配置有效 HTTPS 域名后，在手机登录云端，生成设备 ID 为 `mac` 的五分钟一次性配对码。
 

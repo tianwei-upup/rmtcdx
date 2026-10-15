@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 task_root="$(cd "$(dirname "$0")/.." && pwd)"
+node "$task_root/business/src/runtime-isolation.mjs"
 mkdir -p "$task_root/.runtime/compat-workspace"
 git -C "$task_root/.runtime/compat-workspace" init --quiet
 if [[ ! -f "$task_root/.runtime/compat-workspace/README.md" ]]; then
@@ -16,6 +17,6 @@ fs.writeFileSync(path.join(root, '.runtime/compat-repos.json'), JSON.stringify([
 ]));
 NODE
 cd "$task_root/services/rmtcdx"
-exec env HOST=127.0.0.1 PORT=3210 CODEX_MODE=real \
+exec env CODEX_HOME_DIR="$RMT_CODEX_RUNTIME_HOME" HOST=127.0.0.1 PORT=3210 CODEX_MODE=real \
   DATA_DIR="$task_root/.runtime/mac-data" REPO_CONFIG_PATH="$task_root/.runtime/compat-repos.json" \
   node apps/bridge/dist/main.js serve

@@ -20,6 +20,8 @@ async function fakeBridge(name) {
   let mutations = 0;
   let failing = false;
   let historyBody;
+  let imageResponse;
+  let mutationStatus = 200;
   let readDelay = 0;
   let activeReads = 0;
   let maxReads = 0;
@@ -34,7 +36,11 @@ async function fakeBridge(name) {
       activeReads--; completedReads++;
     }
     if (req.method !== 'GET') { mutations++; await sleep(40); }
-    res.writeHead(failing ? 500 : 200, { 'content-type': 'application/json' });
+    if (req.method === 'GET' && req.url.startsWith('/api/uploads/') && imageResponse) {
+      res.writeHead(200, { 'content-type': imageResponse.type });
+      return res.end(imageResponse.body);
+    }
+    res.writeHead(failing ? 500 : req.method === 'GET' ? 200 : mutationStatus, { 'content-type': 'application/json' });
     if (req.method === 'GET' && req.url.includes('/messages') && historyBody !== undefined) return res.end(historyBody);
     res.end(JSON.stringify({ name, path: req.url, mutations, body }));
   });
@@ -46,6 +52,8 @@ async function fakeBridge(name) {
     get mutations() { return mutations; },
     set failing(value) { failing = value; },
     set historyBody(value) { historyBody = value; },
+    set imageResponse(value) { imageResponse = value; },
+    set mutationStatus(value) { mutationStatus = value; },
     set readDelay(value) { readDelay = value; },
     resetReads() { assert.equal(activeReads, 0); readCalls = 0; maxReads = 0; completedReads = 0; },
     get readCalls() { return readCalls; },
@@ -78,7 +86,22 @@ test('URL and bridge allowlist reject arbitrary destinations and developer inter
   assert.equal(trustedUrl('http://127.0.0.1:3220').origin, 'http://127.0.0.1:3220');
   assert(allowedApi('POST', '/api/runs'));
   assert(allowedApi('GET', '/api/sessions?repoId=all'));
+  const batch = '/api/uploads/upload_12345678-1234-1234-1234-123456789abc/';
+  assert(allowedApi('GET', batch + '01-' + encodeURIComponent('测试 图片.png')));
+  for (const suffix of ['../secret', '01-%2fsecret.png', '01-%5csecret.png', '01-%252fsecret.png', '01-%00.png', '01-test.png/extra', '01-test.png?raw=1']) assert(!allowedApi('GET', batch + suffix), suffix);
+  assert(!allowedApi('POST', batch + '01-image.png'));
+  assert(!allowedApi('GET', '/api/uploads/arbitrary/01-image.png'));
   for (const p of ['http://evil/api/sessions', '//evil/api/sessions', '/api/dev/sessions/abc/codex/requests', '/api/sessions/%2e%2e/repos', '/api/sessions/abc%2fdef', '/api/notifications/subscriptions']) assert(!allowedApi('POST', p), p);
+});
+
+test('legacy request relay rejects remote origins, pairing and non-loopback listeners', async () => {
+  await assert.rejects(createCloud({ publicUrl: 'https://remote.example', password: 'test-only-password-at-least-24-chars' }), /limited to loopback/);
+  assert.throws(() => createClient({ serverUrl: 'https://remote.example', deviceId: 'mac', token: 'x'.repeat(40) }), /limited to loopback/);
+  await assert.rejects(pairDevice({ serverUrl: 'https://remote.example', deviceId: 'mac', code: 'x'.repeat(40), configFile: '/unused' }), /limited to loopback/);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'rmtagt-local-guard-'));
+  const cloud = await createCloud({ password: 'test-only-password-at-least-24-chars', stateFile: path.join(directory, 'cloud.json') });
+  try { await assert.rejects(cloud.listen(0, '0.0.0.0'), /only listen on loopback/); }
+  finally { await cloud.close(); fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('two-device relay protocol, authentication and durable mutation receipts (fake bridges only)', async t => {
@@ -86,7 +109,7 @@ test('two-device relay protocol, authentication and durable mutation receipts (f
   const origin = 'http://127.0.0.1:39999';
   const password = 'test-only-password-at-least-24-chars';
   const stateFile = path.join(dir, 'cloud.json');
-  const cloud = await createCloud({ publicUrl: origin, password, stateFile, heartbeatMs: 200, timeoutMs: 2000, pairingTtlMs: 250 });
+  const cloud = await createCloud({ publicUrl: origin, password, stateFile, heartbeatMs: 5000, timeoutMs: 10000, pairingTtlMs: 250 });
   const address = await cloud.listen(0);
   const base = `http://127.0.0.1:${address.port}`;
   const socketBase = base.replace('http:', 'ws:');
@@ -150,7 +173,7 @@ test('two-device relay protocol, authentication and durable mutation receipts (f
       const config = await pairDevice({ serverUrl: base, deviceId: id, code, configFile: path.join(dir, `${id}.json`) });
       tokens[id] = config.token;
       assert.equal((await fetch(base + '/api/pair', { method: 'POST', body: JSON.stringify({ deviceId: id, code }) })).status, 401);
-      clients.push(createClient({ ...config, bridgePort: bridge.port, receiptFile: path.join(dir, `${id}-receipts.json`), reconnectMs: 50, heartbeatMs: 200 }));
+      clients.push(createClient({ ...config, bridgePort: bridge.port, receiptFile: path.join(dir, `${id}-receipts.json`), reconnectMs: 50, heartbeatMs: 5000 }));
     }
     await until(async () => (await (await request('/api/devices')).json()).devices.every(d => d.online));
     const persisted = fs.readFileSync(stateFile, 'utf8');
@@ -175,6 +198,53 @@ test('two-device relay protocol, authentication and durable mutation receipts (f
     assert.deepEqual(await responses[0].json(), await responses[1].json());
     assert.equal((await request('/devices/windows/api/runs', 'POST', { prompt: 'different' }, { 'x-request-id': id })).status, 409);
     assert(!fs.readFileSync(stateFile, 'utf8').includes('test-private-prompt'));
+  });
+  await t.test('uploaded images preserve binary bytes and MIME with auth, device isolation and size bounds', async () => {
+    const route = '/api/uploads/upload_12345678-1234-1234-1234-123456789abc/01-' + encodeURIComponent('测试 图片.png');
+    const original = Buffer.from([137, 80, 78, 71, 0, 255, 128, 10]);
+    win.imageResponse = { type: 'image/png', body: original };
+    mac.imageResponse = { type: 'image/webp', body: Buffer.from('different-device-image') };
+    try {
+      assert.equal((await fetch(base + '/devices/windows' + route)).status, 401);
+      const response = await request('/devices/windows' + route);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('content-type'), 'image/png');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+      assert.match(response.headers.get('content-security-policy'), /sandbox/);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), original);
+      const other = await request('/devices/mac' + route);
+      assert.equal(other.headers.get('content-type'), 'image/webp');
+      assert.equal(await other.text(), 'different-device-image');
+      win.imageResponse = { type: 'text/html', body: Buffer.from('<script>unsafe</script>') };
+      assert.equal((await request('/devices/windows' + route)).status, 502);
+      const largeBody = Buffer.alloc(25 * 1024 * 1024, 0x89);
+      win.imageResponse = { type: 'image/png', body: largeBody };
+      const large = await request('/devices/windows' + route);
+      assert.equal(large.status, 200);
+      assert.deepEqual(Buffer.from(await large.arrayBuffer()), largeBody);
+      win.imageResponse = { type: 'image/png', body: Buffer.alloc(MAX_RESPONSE + 1) };
+      const oversized = await request('/devices/windows' + route);
+      assert.equal(oversized.status, 413);
+      assert.equal((await oversized.json()).state, 'too_large');
+    } finally { win.imageResponse = undefined; mac.imageResponse = undefined; }
+  });
+  await t.test('durable 409 receipt is explicit; same ID replays, new intent executes after conflict clears', async () => {
+    const route = '/devices/windows/api/sessions/archive-test/archive';
+    const requestId = crypto.randomUUID();
+    const before = win.mutations;
+    win.mutationStatus = 409;
+    try {
+      const rejected = await request(route, 'POST', undefined, { 'x-request-id': requestId });
+      assert.equal(rejected.status, 409);
+      assert.equal(rejected.headers.get('x-rmtagt-receipt'), 'complete');
+      win.mutationStatus = 200;
+      const replay = await request(route, 'POST', undefined, { 'x-request-id': requestId });
+      assert.equal(replay.status, 409);
+      assert.equal(replay.headers.get('x-rmtagt-receipt'), 'complete');
+      assert.equal(win.mutations, before + 1);
+      assert.equal((await request(route, 'POST', undefined, { 'x-request-id': crypto.randomUUID() })).status, 200);
+      assert.equal(win.mutations, before + 2);
+    } finally { win.mutationStatus = 200; }
   });
   await t.test('15,331,058-byte escaped history passes intact; request and response bounds return explicit 413', async () => {
     const prefix = '{"messages":[{"text":"';
@@ -210,7 +280,7 @@ test('two-device relay protocol, authentication and durable mutation receipts (f
     assert.equal((await request('/devices/windows/api/sessions', 'POST', body, { 'x-request-id': requestId })).status, 200);
     const before = win.mutations;
     await clients[0].close();
-    clients[0] = createClient({ serverUrl: base, deviceId: 'windows', token: tokens.windows, bridgePort: win.port, receiptFile: path.join(dir, 'windows-receipts.json'), reconnectMs: 50, heartbeatMs: 200 });
+    clients[0] = createClient({ serverUrl: base, deviceId: 'windows', token: tokens.windows, bridgePort: win.port, receiptFile: path.join(dir, 'windows-receipts.json'), reconnectMs: 50, heartbeatMs: 5000 });
     await until(() => clients[0].connected);
     assert.equal((await request('/devices/windows/api/sessions', 'POST', body, { 'x-request-id': requestId })).status, 200);
     assert.equal(win.mutations, before);
@@ -226,29 +296,47 @@ test('two-device relay protocol, authentication and durable mutation receipts (f
   });
   await t.test('ten normal reads queue without 429, at most four dispatch; writes have independent capacity', async () => {
     win.resetReads(); win.readDelay = 250;
-    const reads = Array.from({ length: 10 }, (_, index) => request(`/devices/windows/api/sessions?request=${index}`));
-    await until(() => win.readCalls === 4);
+    const reads = Array.from({ length: 10 }, (_, index) => request(`/devices/windows/api/sessions/history${index}/messages`));
+    await until(() => win.readCalls === 3);
     const write = await request('/devices/windows/api/runs', 'POST', { prompt: 'write priority' });
     assert.equal(write.status, 200);
     assert.equal(win.completedReads, 0);
+    const poll = await request('/devices/windows/api/runs/poll-test');
+    assert.equal(poll.status, 200, 'Run polling uses its reserved slot during history loading');
+    assert(win.completedReads < 10, 'Polling must complete before the history queue drains');
     const responses = await Promise.all(reads);
     assert(responses.every(r => r.status === 200));
-    assert.equal(win.readCalls, 10);
+    assert.equal(win.readCalls, 11);
+    assert.equal(win.maxReads, 4);
+    win.readDelay = 0;
+  });
+  await t.test('catalog backlog leaves room for current-thread messages and run polling', async () => {
+    win.resetReads(); win.readDelay = 250;
+    const catalogs = Array.from({ length: 5 }, (_, index) => request(`/devices/windows/api/sessions?catalog=${index}`));
+    await until(() => win.readCalls === 2);
+    const interactive = await Promise.all([
+      request('/devices/windows/api/sessions/current/messages'),
+      request('/devices/windows/api/sessions/current/codex/requests'),
+      request('/devices/windows/api/runs/current')
+    ]);
+    assert(interactive.every(r => r.status === 200));
+    assert(win.completedReads < 8, 'Interactive reads must not wait for the full catalog backlog');
+    assert((await Promise.all(catalogs)).every(r => r.status === 200));
     assert.equal(win.maxReads, 4);
     win.readDelay = 0;
   });
   await t.test('network disconnect cancels queued reads and reconnect never dispatches them', async () => {
     win.resetReads(); win.readDelay = 400;
-    const reads = Array.from({ length: 10 }, (_, index) => request(`/devices/windows/api/sessions?cancel=${index}`));
-    await until(() => win.readCalls === 4);
+    const reads = Array.from({ length: 10 }, (_, index) => request(`/devices/windows/api/sessions/cancel${index}/messages`));
+    await until(() => win.readCalls === 3);
     const previous = agentSockets.get('windows');
     previous.destroy();
     const responses = await Promise.all(reads);
     assert(responses.every(r => r.status === 503));
     await until(() => agentSockets.get('windows') !== previous && clients[0].connected);
     await sleep(500);
-    assert.equal(win.readCalls, 4);
-    assert.equal(win.maxReads, 4);
+    assert.equal(win.readCalls, 3);
+    assert.equal(win.maxReads, 3);
     win.readDelay = 0;
     assert.equal((await request('/devices/windows/api/sessions')).status, 200);
   });

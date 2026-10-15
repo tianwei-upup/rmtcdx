@@ -1,6 +1,8 @@
 param([int]$Port = 3210, [string]$RepoConfig = '')
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path $PSScriptRoot -Parent
+& node (Join-Path $taskRoot 'business/src/runtime-isolation.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'Native Codex startup blocked: independent runtime/profile required.' }
 $taskService = Join-Path $taskRoot 'services\rmtcdx'
 $taskRuntime = Join-Path $taskRoot '.runtime'
 $taskEntry = Join-Path $taskService 'apps\bridge\dist\main.js'
@@ -25,8 +27,10 @@ $taskOriginalPort = $env:PORT
 $taskOriginalMode = $env:CODEX_MODE
 $taskOriginalData = $env:DATA_DIR
 $taskOriginalRepoConfig = $env:REPO_CONFIG_PATH
+$taskOriginalCodexHomeDir = $env:CODEX_HOME_DIR
 try {
     $env:Path = (Split-Path $taskCodexBinary -Parent) + ';' + $env:Path
+    $env:CODEX_HOME_DIR = $env:RMT_CODEX_RUNTIME_HOME
     $env:HOST = '127.0.0.1'
     $env:PORT = "$Port"
     $env:CODEX_MODE = 'real'
@@ -46,6 +50,7 @@ try {
     $env:CODEX_MODE = $taskOriginalMode
     $env:DATA_DIR = $taskOriginalData
     $env:REPO_CONFIG_PATH = $taskOriginalRepoConfig
+    $env:CODEX_HOME_DIR = $taskOriginalCodexHomeDir
 }
 for ($taskAttempt = 0; $taskAttempt -lt 30; $taskAttempt++) {
     if ($taskProcess.HasExited) { throw "服务退出。检查 $taskRuntime\bridge.stderr.log" }

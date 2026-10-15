@@ -43,7 +43,6 @@ public class MainActivity extends Activity {
     private static final int LOG_EXPORT = 42;
     private static final String[] NAMES = {"Windows", "Mac"};
     private final WebView[] pages = new WebView[2];
-    private final Button[] hostButtons = new Button[2];
     private SharedPreferences preferences;
     private FrameLayout content;
     private TextView status;
@@ -67,39 +66,36 @@ public class MainActivity extends Activity {
         } catch (IOException error) { logs.record("App", "diagnostics.error", DiagnosticLog.data("error", "IOException")); }
         migrateWindowsDefault();
         active = preferences.getInt("active", 0) == 1 ? 1 : 0;
-        getWindow().setStatusBarColor(Color.rgb(23, 43, 53));
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.WHITE);
-
-        LinearLayout hosts = new LinearLayout(this);
-        hosts.setPadding(dp(8), dp(4), dp(8), 0);
-        for (int i = 0; i < NAMES.length; i++) {
-            final int index = i;
-            hostButtons[i] = button(NAMES[i], () -> switchHost(index));
-            hosts.addView(hostButtons[i], new LinearLayout.LayoutParams(0, dp(48), 1));
-        }
-        hosts.addView(button("配置", this::configureHost));
-        root.addView(hosts);
-        status = new TextView(this);
-        status.setTextSize(12);
-        status.setPadding(dp(16), dp(4), dp(16), dp(6));
-        status.setTextColor(Color.rgb(55, 73, 82));
-        status.setMaxLines(3);
-        root.addView(status);
-        progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        root.addView(progress, new LinearLayout.LayoutParams(-1, dp(3)));
+        boolean dark = (getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+            == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        int background = dark ? Color.rgb(33, 33, 33) : Color.WHITE;
+        getWindow().setStatusBarColor(background);
+        getWindow().setNavigationBarColor(background);
+        int systemFlags = getWindow().getDecorView().getSystemUiVisibility();
+        int lightFlags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        getWindow().getDecorView().setSystemUiVisibility(dark ? systemFlags & ~lightFlags : systemFlags | lightFlags);
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(background);
         content = new FrameLayout(this);
-        root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
-        LinearLayout actions = new LinearLayout(this);
-        actions.addView(button("返回", this::goBack), new LinearLayout.LayoutParams(0, dp(48), 1));
-        actions.addView(button("刷新", this::refresh), new LinearLayout.LayoutParams(0, dp(48), 1));
-        actions.addView(button("连接说明", this::showHelp), new LinearLayout.LayoutParams(0, dp(48), 1));
-        root.addView(actions);
-        LinearLayout diagnostics = new LinearLayout(this);
-        diagnostics.addView(button("日志", this::showLogs), new LinearLayout.LayoutParams(0, dp(40), 1));
-        diagnostics.addView(button("导出日志", this::chooseLogExport), new LinearLayout.LayoutParams(0, dp(40), 1));
-        root.addView(diagnostics);
+        root.addView(content, new FrameLayout.LayoutParams(-1, -1));
+        // Keep diagnostics out of the chat canvas. Connection errors use contextual toasts.
+        status = new TextView(this);
+        progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        root.addView(progress, new FrameLayout.LayoutParams(-1, dp(2), android.view.Gravity.TOP));
+        Button menu = button("⋮", this::showMore);
+        menu.setTextSize(25);
+        menu.setTextColor(Color.rgb(117, 117, 117));
+        menu.setContentDescription("更多选项");
+        menu.setPadding(0, 0, 0, dp(3));
+        android.graphics.drawable.GradientDrawable circle = new android.graphics.drawable.GradientDrawable();
+        circle.setColor(Color.WHITE);
+        circle.setCornerRadius(dp(22));
+        menu.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x20757575), null, circle));
+        menu.setStateListAnimator(null);
+        menu.setElevation(0);
+        FrameLayout.LayoutParams menuLayout = new FrameLayout.LayoutParams(dp(48), dp(48), android.view.Gravity.TOP | android.view.Gravity.END);
+        menuLayout.topMargin = dp(7); menuLayout.rightMargin = dp(8);
+        root.addView(menu, menuLayout);
         setContentView(root);
         switchHost(active);
     }
@@ -134,7 +130,6 @@ public class MainActivity extends Activity {
         if (pages[active] != null) pages[active].onPause();
         active = index;
         preferences.edit().putInt("active", active).apply();
-        for (int i = 0; i < hostButtons.length; i++) hostButtons[i].setEnabled(i != active);
         content.removeAllViews();
         String address = endpoint(active);
         logs.record(NAMES[active], "host.select", DiagnosticLog.data("url", address));
@@ -142,7 +137,7 @@ public class MainActivity extends Activity {
         if (address.isEmpty() || !HostAddress.isAllowed(address)) {
             status.setText(NAMES[active] + " · 尚未配置");
             TextView empty = new TextView(this);
-            empty.setText("点击右上角「配置」，填写统一云端 HTTPS 地址。\n\nWindows 与 Mac 客户端连接云端后，可在这里切换，各自保留当前页面。");
+            empty.setText("点击右上角菜单中的「配置」，填写统一云端 HTTPS 地址。\n\nWindows 与 Mac 客户端连接云端后，可在这里切换，各自保留当前页面。");
             empty.setTextSize(18);
             empty.setPadding(dp(24), dp(40), dp(24), 0);
             content.addView(empty);
@@ -162,6 +157,8 @@ public class MainActivity extends Activity {
         WebView page = new WebView(this);
         WebSettings settings = page.getSettings();
         settings.setJavaScriptEnabled(true);
+        settings.setUserAgentString(settings.getUserAgentString() + " CodexRemoteAndroid/0.3");
+        page.setBackgroundColor((getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES ? Color.rgb(33, 33, 33) : Color.WHITE);
         settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false);
         settings.setAllowContentAccess(false);
@@ -174,6 +171,13 @@ public class MainActivity extends Activity {
                 boolean allowed = HostAddress.isAllowed(request.getUrl().toString());
                 logs.record(NAMES[index], allowed ? "navigation.allow" : "navigation.block", DiagnosticLog.data(
                     "url", request.getUrl().toString(), "method", request.getMethod(), "mainFrame", request.isForMainFrame()));
+                if (allowed && request.isForMainFrame() && sameOrigin(request.getUrl().toString(), endpoint(index))) {
+                    String target = request.getUrl().getPath();
+                    if (target != null && target.matches("/devices/(windows|mac)/?")) {
+                        int targetIndex = target.contains("/mac") ? 1 : 0;
+                        if (targetIndex != index) { switchHost(targetIndex); return true; }
+                    }
+                }
                 if (allowed) return false;
                 if (request.isForMainFrame()) showStatus(index, "已阻止不安全或不支持的跳转");
                 return true;
@@ -250,7 +254,19 @@ public class MainActivity extends Activity {
     }
 
     private void showStatus(int index, String message) {
-        if (index == active) status.setText(NAMES[index] + " · " + message);
+        if (index == active) { status.setText(NAMES[index] + " · " + message); Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
+    }
+
+    private void showMore() {
+        new AlertDialog.Builder(this).setTitle("当前电脑：" + NAMES[active])
+            .setItems(new String[]{"Windows", "Mac", "配置", "刷新", "连接说明", "日志", "导出日志"}, (dialog, which) -> {
+                if (which < 2) switchHost(which);
+                else if (which == 2) configureHost();
+                else if (which == 3) refresh();
+                else if (which == 4) showHelp();
+                else if (which == 5) showLogs();
+                else chooseLogExport();
+            }).setNegativeButton("取消", null).show();
     }
 
     private void configureHost() {
@@ -348,7 +364,7 @@ public class MainActivity extends Activity {
     }
     private void showHelp() {
         new AlertDialog.Builder(this).setTitle("连接电脑上的 Codex")
-            .setMessage("在「配置 → 统一云端地址」填写云端 HTTPS 地址并登录。两台电脑分别以 windows、mac 设备标识连接同一云端。\n\n电脑需要保持开机联网。切换主机与从后台返回不会主动刷新，必要时点击「刷新」。\n\n直连方式仍可在「配置」中选择。127.0.0.1 指向手机自身，仅在电脑通过 USB 设置 adb reverse 后可用于本机调试。")
+            .setMessage("在「配置 → 统一云端地址」填写云端 HTTPS 地址并登录。两台电脑分别以 windows、mac 设备标识连接同一云端。\n\n电脑需要保持开机联网。切换主机与从后台返回不会主动刷新，必要时点击「刷新」。\n\n直连方式仍可在「配置」中选择。127.0.0.1 指向手机自身，仅在电脑通过 USB 设置 adb reverse 后可用于旧版本机回归。业务服务验证无需 USB 映射。")
             .setPositiveButton("确定", null).show();
     }
 
@@ -364,12 +380,14 @@ public class MainActivity extends Activity {
 
     private void logCookieState(int index) {
         boolean present = false;
+        boolean cloudPresent = false;
         Long remaining = null;
         try {
             String cookies = CookieManager.getInstance().getCookie(endpoint(index));
             if (cookies != null) {
                 for (String part : cookies.split(";")) {
                     String cookie = part.trim();
+                    if (cookie.startsWith("__Host-rmtagt=") || cookie.startsWith("rmtagt=")) cloudPresent = true;
                     String name = "__Host-cloudflared-qt-auth-session=";
                     if (!cookie.startsWith(name)) continue;
                     present = true;
@@ -380,7 +398,8 @@ public class MainActivity extends Activity {
                 }
             }
         } catch (Exception ignored) { }
-        logs.record(NAMES[index], "cookies.state", DiagnosticLog.data("qtCookiePresent", present, "expiresInSeconds", remaining));
+        logs.record(NAMES[index], "cookies.state", DiagnosticLog.data("cloudCookiePresent", cloudPresent,
+            "qtCookiePresent", present, "expiresInSeconds", remaining));
     }
 
     private void showLogs() {
