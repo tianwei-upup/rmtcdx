@@ -1,0 +1,13 @@
+<evaluation>
+  <!-- Read-only questions for the fixed 2026-10-15 acceptance turns; do not send prompts. Discover the granted ID with companion_status, then use snapshots/receipts and pagination. Not an assertion that an external evaluator has run. -->
+  <qa_pair><question>Locate the granted acceptance chat and compare its initialization with its first two continuation replies on 2026-10-15. What unchanged memory token do all three contain?</question><answer>LANTERN-4826</answer></qa_pair>
+  <qa_pair><question>In the granted chat, compare the first two continuation replies with the initialization. Which complete first-continuation reply is quoted by the second?</question><answer>ROUND1 LANTERN-4826</answer></qa_pair>
+  <qa_pair><question>Read the granted chat's completed acceptance turns before the first cloud transport test. Which complete reply records the controlled owner lifecycle test after the two local continuations?</question><answer>LIFECYCLE LANTERN-4826</answer></qa_pair>
+  <qa_pair><question>Compare the local lifecycle reply and the two phone replies in the granted chat. Return the complete intervening cloud-only acceptance reply.</question><answer>ECS LANTERN-4826</answer></qa_pair>
+  <qa_pair><question>Compare both phone acceptance replies with the earlier initialization in the granted chat. Return the complete earlier phone reply referenced by the later phone reply.</question><answer>APK1 LANTERN-4826</answer></qa_pair>
+  <qa_pair><question>Inspect the original MCP lock intent receipt and locate the corresponding turn in the granted chat. Return its real turn ID.</question><answer>01a14010-2ff9-7af0-9a24-4fda26064234</answer></qa_pair>
+  <qa_pair><question>Inspect the MCP restart continuation receipt and match it with the granted chat's reply that recalls the lock test. Return its real turn ID.</question><answer>01a14010-7746-7db0-9622-27b93155b58e</answer></qa_pair>
+  <qa_pair><question>Use receipt mcp-lock-20261015-1 to locate its historical turn, then compare it with receipt mcp-restart-20261015-2 and that turn's quoted predecessor. Return the complete predecessor text.</question><answer>LOCK1 LANTERN-4826</answer></qa_pair>
+  <qa_pair><question>Read both historical MCP intent receipts and their matching snapshot turns. Were both associated turns completed? Answer True or False.</question><answer>True</answer></qa_pair>
+  <qa_pair><question>Use both historical MCP receipts and the chat's initialization to verify that service restart preserved the original conversation. Return the single shared thread ID.</question><answer>01a13feb-ce80-7ca3-aa1e-17814542b353</answer></qa_pair>
+</evaluation>

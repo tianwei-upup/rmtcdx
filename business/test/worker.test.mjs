@@ -11,7 +11,7 @@ test('worker executes one durable business intent; restart expires RAM input and
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'business-worker-'));
   const origin = 'http://127.0.0.1:3230', password = 'test-only-password-at-least-24-characters', stateFile = path.join(dir, 'server.json');
   let server = await createBusinessServer({ origin, password, stateFile, claimWaitMs: 10 });
-  let port = (await server.listen(0)).port, cookie, calls = 0, online = false;
+  let port = (await server.listen(0)).port, cookie, calls = 0, online = false, eventSink;
   async function api(route, data) {
     const response = await fetch(`http://127.0.0.1:${port}` + route, { method: data ? 'POST' : 'GET', headers: { origin, cookie: cookie ?? '', 'content-type': 'application/json' }, body: data ? JSON.stringify(data) : undefined });
     if (route === '/api/login') cookie = response.headers.get('set-cookie')?.split(';')[0];
@@ -19,9 +19,10 @@ test('worker executes one durable business intent; restart expires RAM input and
   }
   await api('/api/login', { username: 'admin', password });
   const pair = (await api('/api/pairing', { deviceId: 'mac', name: 'Mac' })).value;
-  const adapter = { async start() { online = true; }, async stop() { online = false; }, ready: () => online,
+  const adapter = { operations: ['projects.sync'], setEventSink(value) { eventSink = value; }, async start() { online = true; }, async stop() { online = false; }, ready: () => online,
     async execute(operation) { calls++; assert.equal(operation, 'projects.sync'); return { projects: [{ id: 'fixture', name: 'Fixture' }] }; } };
   const agent = await startAgent({ origin: `http://127.0.0.1:${port}`, deviceId: 'mac', pairCode: pair.code, stateFile: path.join(dir, 'agent.json'), projects: [], adapter, log() {} });
+  assert.equal(typeof eventSink, 'function');
   t.after(async () => { await agent.stop(); await server.close(); fs.rmSync(dir, { recursive: true, force: true }); });
   const intent = crypto.randomUUID(), payload = { resource: 'projects', clientIntentId: intent };
   const accepted = await api('/api/devices/mac/sync', payload); assert.equal(accepted.status, 202);

@@ -43,7 +43,7 @@
 
 ## 验证
 
-- `npm --prefix business test`：49 项。状态机、跨目录隔离、参数校验、幂等、租约丢失、重启与执行器回执，以及附加型执行器的离线协议与失败关闭测试（真实 Unix socket + RFC 6455 + JSON-RPC，不使用真实 Codex）。
+- `npm --prefix business test`：51 项。状态机、跨目录隔离、参数校验、幂等、租约丢失、重启与执行器回执、队列契约，以及附加型执行器的离线协议与失败关闭测试（真实 Unix socket + RFC 6455 + JSON-RPC，不使用真实 Codex）。
 - `npm --prefix business run check` 和 `npm --prefix business run build`。
 - `NODE_EXTRA_CA_CERTS="$PWD/.runtime/business/tls/ca.pem" node scripts/verify-business-local.mjs`：真实新建/续聊、快照、分页、事件与落盘正文检查。
 - 同样环境运行 `scripts/verify-business-advanced.mjs`：真实图片输入及指定轮次中断。
@@ -54,3 +54,9 @@
 ## 聊天界面
 
 0.3.0 使用会话抽屉、底部输入栏和独立会话状态。静态模块位于 `web/`，构建时将本地 Phosphor 图标打包到 dist/icons，带上许可证，不加载外部 CDN。开发构建先 `npm ci`，部署包携带已构建图标，不需要在服务器安装前端依赖。交互验证见 `docs/UI_INTERACTION_VALIDATION.md`。
+
+## 本机 Inbox 队列协议
+
+桌面主动领取协议 v2 的本机验收见 [持续领取与取消恢复](../docs/DESKTOP_OWNER_CONSUMER.md)。新增 `queue.enqueue/status/cancel/consumer.stop`，入队交付 job succeeded 不等于模型任务完成；使用独立 intentId、consumerTurnId 与 revision，不生成假 turn ID。
+
+默认 `OPERATIONS`、服务器和 ECS 启动器不开放队列写入。测试必须在 server、agent、adapter 显式启用 `enableLocalQueueTest`，且 origin/listen host 仅 loopback；正文和结果不写入服务端持久化元数据。手机 UI 和公网部署尚未启用。

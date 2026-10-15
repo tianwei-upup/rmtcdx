@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { JsonStore } from './storage.mjs';
 import { nativeAdapter } from './codex-adapter.mjs';
-import { OPERATIONS, READS } from './contracts.mjs';
+import { OPERATIONS, SUPPORTED_OPERATIONS, READS } from './contracts.mjs';
 import { assertIsolatedNativeRuntime, assertNativeExecutionAllowed } from './runtime-isolation.mjs';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export async function startAgent(config) {
@@ -54,6 +54,10 @@ export async function startAgent(config) {
       createClient: attachClientFactory({ emit: emitEvent, attachmentDir })
     });
   } else adapter = await nativeAdapter(config.projects, emitEvent, attachmentDir, conversationProjects, runtimeHome);
+  const accepts = config.operations ?? adapter.operations ?? OPERATIONS;
+  const allowedOperations = config.enableLocalQueueTest === true && ['127.0.0.1','localhost'].includes(origin.hostname) ? SUPPORTED_OPERATIONS : OPERATIONS;
+  if (!Array.isArray(accepts) || !accepts.length || accepts.some(operation => !allowedOperations.includes(operation))) { await adapter.stop(); store.close(); throw new Error('invalid_adapter_capabilities'); }
+  if (typeof adapter.setEventSink === 'function') adapter.setEventSink(emitEvent);
   const isReady = () => typeof adapter.ready === 'function' ? adapter.ready() : adapter.getState?.().ready === true;
   await adapter.start();
   async function heartbeat() {
@@ -78,7 +82,7 @@ export async function startAgent(config) {
   const loop = (async () => {
     while (!stopped) {
       try {
-        const { task } = await call('/api/agent/tasks/claim', { accepts: OPERATIONS });
+        const { task } = await call('/api/agent/tasks/claim', { accepts });
         if (!task || stopped) continue;
         active = task;
         await call(`/api/agent/tasks/${task.id}/ack`, { leaseToken: task.leaseToken });

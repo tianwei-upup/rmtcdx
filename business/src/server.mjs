@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { TaskBoard } from './tasks.mjs';
 import { JsonStore } from './storage.mjs';
-import { object, identifier, string, fingerprint, fail, id, OPERATIONS, businessEvent, output, validateImage } from './contracts.mjs';
+import { object, identifier, string, fingerprint, fail, id, OPERATIONS, SUPPORTED_OPERATIONS, QUEUE_OPERATIONS, businessEvent, output, validateImage } from './contracts.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -30,6 +30,9 @@ async function body(req, limit = 4 * 1024 * 1024) {
 
 export async function createBusinessServer(options = {}) {
   const origin = originUrl(options.origin ?? process.env.RMT_BUSINESS_ORIGIN ?? 'http://127.0.0.1:3230');
+  const queueTest = options.enableLocalQueueTest === true;
+  if (queueTest && !['127.0.0.1','localhost'].includes(new URL(origin).hostname)) fail('queue_protocol_loopback_only');
+  const acceptedOperations = queueTest ? SUPPORTED_OPERATIONS : OPERATIONS;
   const password = options.password ?? process.env.RMT_BUSINESS_PASSWORD;
   if (typeof password !== 'string' || password.length < 24) fail('admin_password_required');
   const username = options.username ?? 'admin';
@@ -65,7 +68,7 @@ export async function createBusinessServer(options = {}) {
     const heartbeat = heartbeats.get(deviceId);
     if (!heartbeat?.ready || heartbeat.at < Date.now() - 25_000) fail('device_offline', 409);
     const job = board.submit(deviceId, operation, value, intentId);
-    if (!Object.hasOwn(store.data.scopes, job.id)) { store.data.scopes[job.id] = { ...(value.projectId ? { projectId: value.projectId } : {}), ...(value.conversationId ? { conversationId: value.conversationId } : {}), ...(value.attachmentId ? { attachmentId: value.attachmentId } : {}) }; store.save(); }
+    if (!Object.hasOwn(store.data.scopes, job.id)) { store.data.scopes[job.id] = { ...(value.projectId ? { projectId: value.projectId } : {}), ...(value.conversationId ? { conversationId: value.conversationId } : {}), ...(value.attachmentId ? { attachmentId: value.attachmentId } : {}), ...(QUEUE_OPERATIONS.includes(operation) && value.intentId ? {queueIntentId:value.intentId}:{}), ...(QUEUE_OPERATIONS.includes(operation) && value.sessionId ? {queueSessionId:value.sessionId}:{}) }; store.save(); }
     return job;
   }
   function ownedConversation(conversationId, deviceId) {
@@ -97,6 +100,9 @@ export async function createBusinessServer(options = {}) {
       if (Object.hasOwn(store.data.conversations, conversation.id) && (store.data.conversations[conversation.id].deviceId !== job.deviceId || job.operation !== 'directory.sync' && store.data.conversations[conversation.id].projectId !== conversation.projectId)) fail('conversation_collision', 409);
     }
     if (['turn.start', 'turn.cancel', 'approval.resolve', 'attachment.stage'].includes(job.operation) && result.conversationId !== scope.conversationId) fail('result_scope_mismatch', 409);
+    if (QUEUE_OPERATIONS.includes(job.operation)) {
+      if (result.conversationId !== scope.conversationId || result.receipt && result.receipt.intentId !== scope.queueIntentId || scope.queueIntentId && result.receipts?.some(r=>r.intentId !== scope.queueIntentId) || scope.queueSessionId && result.consumer?.sessionId !== scope.queueSessionId) fail('result_scope_mismatch',409);
+    }
     if (job.operation === 'attachment.stage' && result.attachmentId !== scope.attachmentId) fail('result_scope_mismatch', 409);
     if (job.operation === 'turn.start') { const turn = store.data.turns[result.turnId]; if (turn && (turn.jobId !== job.id || turn.conversationId !== result.conversationId)) fail('turn_collision', 409); }
     if (candidates.some(c => !Object.hasOwn(store.data.conversations, c.id)) && Object.keys(store.data.conversations).length >= 20000) fail('conversation_capacity', 507);
@@ -170,7 +176,7 @@ export async function createBusinessServer(options = {}) {
         }
         if (p === '/api/agent/tasks/claim' && method === 'POST') {
           const data = await body(req, 4096); object(data, ['accepts']);
-          if (!Array.isArray(data.accepts) || !data.accepts.length || data.accepts.length > OPERATIONS.length || data.accepts.some(value => !OPERATIONS.includes(value))) fail('invalid_capabilities');
+          if (!Array.isArray(data.accepts) || !data.accepts.length || data.accepts.length > acceptedOperations.length || data.accepts.some(value => !acceptedOperations.includes(value))) fail('invalid_capabilities');
           const until = Date.now() + (options.claimWaitMs ?? 20_000); waiting.add(res);
           try {
             do {
@@ -245,6 +251,16 @@ export async function createBusinessServer(options = {}) {
           return json(res, 200, cached.value);
         }
         const upload = /^\/api\/conversations\/([A-Za-z0-9_-]+)\/attachments$/.exec(p);
+        const queueRoute = /^\/api\/conversations\/([A-Za-z0-9_-]+)\/queue(?:\/(status|cancel|stop))?$/.exec(p);
+        if (queueRoute && method === 'POST') {
+          if (!queueTest) fail('queue_protocol_disabled',403);
+          const conversation = ownedConversation(queueRoute[1]), action = queueRoute[2] ?? 'enqueue', data = await body(req,32768);
+          const fields = action === 'enqueue' ? ['clientIntentId','text'] : action === 'cancel' ? ['clientIntentId','intentId','expectedRevision'] : action === 'stop' ? ['clientIntentId','sessionId'] : ['clientIntentId','intentId'];
+          object(data,fields,action === 'status' ? ['clientIntentId'] : fields);
+          const {clientIntentId,...args} = data;
+          const operation = action === 'stop' ? 'queue.consumer.stop' : 'queue.'+action;
+          return json(res,202,submit(conversation.deviceId,operation,{...args,conversationId:queueRoute[1],...(action === 'enqueue' ? {intentId:clientIntentId}:{})},clientIntentId));
+        }
         if (upload && method === 'POST') {
           const conversation = ownedConversation(upload[1]);
           const data = await body(req, 2900000); object(data, ['clientIntentId', 'mime', 'base64']); validateImage(data.mime, data.base64);
@@ -317,7 +333,7 @@ export async function createBusinessServer(options = {}) {
     for (const [key, log] of eventLogs) if (log.expires < Date.now()) eventLogs.delete(key);
     for (const subscriber of subscribers) { if (!authenticated(subscriber.req)) { subscriber.res.end(); subscribers.delete(subscriber); continue; } if (subscriber.res.writableLength > 1024 * 1024) subscriber.res.destroy(); else subscriber.res.write(': heartbeat\n\n'); }
   }, 5000); sweep.unref();
-  return { server, origin, listen: (port = Number(process.env.RMT_BUSINESS_PORT ?? 3230), host = process.env.RMT_BUSINESS_HOST ?? '127.0.0.1') => new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve(server.address()); }); }),
+  return { server, origin, listen: (port = Number(process.env.RMT_BUSINESS_PORT ?? 3230), host = process.env.RMT_BUSINESS_HOST ?? '127.0.0.1') => new Promise((resolve, reject) => { if (queueTest && !['127.0.0.1','localhost'].includes(host)) return reject(Error('queue_protocol_loopback_only')); server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve(server.address()); }); }),
     async close() { closing = true; clearInterval(sweep); for (const subscriber of subscribers) subscriber.res.end(); for (const res of waiting) if (!res.writableEnded) json(res, 503, { code: 'server_stopping' }); await new Promise(resolve => server.close(resolve)); store.close(); } };
 }
 

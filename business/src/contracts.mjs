@@ -11,6 +11,25 @@ const canonical = value => Array.isArray(value) ? value.map(canonical) : value &
 export const fingerprint = value => crypto.createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 export const READS = new Set(['projects.sync', 'directory.sync', 'sessions.sync', 'conversation.snapshot']);
 export const OPERATIONS = ['projects.sync', 'directory.sync', 'sessions.sync', 'conversation.snapshot', 'conversation.create', 'turn.start', 'turn.cancel', 'approval.resolve', 'attachment.stage'];
+export const QUEUE_OPERATIONS = ['queue.enqueue', 'queue.status', 'queue.cancel', 'queue.consumer.stop'];
+export const SUPPORTED_OPERATIONS = [...OPERATIONS, ...QUEUE_OPERATIONS];
+READS.add('queue.status');
+function queueReceipt(value, conversationId) {
+  object(value, ['intentId','threadId','state','revision','cancelRequested','consumerTurnId','sessionId','outcomeUncertain','resolution','result'], ['intentId','threadId','state','revision','cancelRequested','consumerTurnId','sessionId','outcomeUncertain']);
+  identifier(value.intentId); if (value.threadId !== conversationId) fail('queue_scope_mismatch');
+  if (!['queued','leased','completed','cancelled','unknown'].includes(value.state) || !Number.isSafeInteger(value.revision) || value.revision < 1 || typeof value.cancelRequested !== 'boolean') fail('invalid_queue_receipt');
+  if (value.consumerTurnId !== null) identifier(value.consumerTurnId); if (value.sessionId !== null) identifier(value.sessionId);
+  if (typeof value.outcomeUncertain !== 'boolean' || value.state === 'unknown' && !value.outcomeUncertain || value.resolution !== undefined && (value.resolution !== 'abandoned_unknown' || value.state !== 'cancelled' || !value.outcomeUncertain) || value.outcomeUncertain && !['unknown','cancelled'].includes(value.state)) fail('invalid_queue_uncertainty');
+  if (value.state === 'queued' && (value.consumerTurnId !== null || value.sessionId !== null)) fail('invalid_queue_receipt');
+  if (value.state === 'completed') string(value.result,16000); else if (value.result !== undefined) fail('invalid_queue_result');
+}
+function queueConsumer(value) {
+  if (value === null) return;
+  object(value,['sessionId','consumerTurnId','state','waiting','expiresAt','maxJobs','takenJobs','stopReason']);
+  identifier(value.sessionId); identifier(value.consumerTurnId);
+  if (!['active','stopping','closed'].includes(value.state) || typeof value.waiting !== 'boolean' || !Number.isSafeInteger(value.expiresAt) || value.expiresAt < 0 || !Number.isSafeInteger(value.maxJobs) || value.maxJobs < 1 || value.maxJobs > 100 || !Number.isSafeInteger(value.takenJobs) || value.takenJobs < 0 || value.takenJobs > value.maxJobs) fail('invalid_queue_consumer');
+  if (value.stopReason !== null) string(value.stopReason,100);
+}
 function page(value) {
   if (value.pageSize !== undefined && (!Number.isInteger(value.pageSize) || value.pageSize < 1 || value.pageSize > 100)) fail('invalid_page_size');
   if (value.cursor != null) string(value.cursor, 1000);
@@ -22,6 +41,15 @@ function conversation(value) {
   if (value.updatedAt !== undefined && (!Number.isSafeInteger(value.updatedAt) || value.updatedAt < 0)) fail('invalid_timestamp');
 }
 export function input(operation, value) {
+  if (QUEUE_OPERATIONS.includes(operation)) {
+    const keys = operation === 'queue.enqueue' ? ['conversationId','intentId','text'] : operation === 'queue.cancel' ? ['conversationId','intentId','expectedRevision'] : operation === 'queue.consumer.stop' ? ['conversationId','sessionId'] : ['conversationId','intentId'];
+    object(value, keys, operation === 'queue.status' ? ['conversationId'] : keys); identifier(value.conversationId);
+    if (value.intentId !== undefined) { identifier(value.intentId); if (!/^[a-zA-Z0-9-]{1,80}$/.test(value.intentId)) fail('invalid_queue_intent'); }
+    if (operation === 'queue.enqueue' && !string(value.text,16000).trim()) fail('invalid_queue_text');
+    if (operation === 'queue.cancel' && (!Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 1)) fail('invalid_queue_revision');
+    if (value.sessionId !== undefined) identifier(value.sessionId);
+    return structuredClone(value);
+  }
   if (operation === 'projects.sync' || operation === 'directory.sync') { object(value, []); return {}; }
   if (operation === 'sessions.sync') {
     object(value, ['projectId', 'cursor', 'pageSize', 'search', 'archived'], ['projectId']); identifier(value.projectId); page(value);
@@ -53,6 +81,16 @@ export function input(operation, value) {
   return structuredClone(value);
 }
 export function output(operation, value) {
+  if (QUEUE_OPERATIONS.includes(operation)) {
+    const keys = operation === 'queue.status' ? ['conversationId','receipts','consumer'] : operation === 'queue.consumer.stop' ? ['conversationId','consumer'] : ['conversationId','receipt'];
+    object(value,keys); identifier(value.conversationId);
+    if (operation === 'queue.status') {
+      if (!Array.isArray(value.receipts) || value.receipts.length > 100 || new Set(value.receipts.map(r=>r.intentId)).size !== value.receipts.length) fail('invalid_queue_receipts');
+      value.receipts.forEach(r=>queueReceipt(r,value.conversationId)); queueConsumer(value.consumer);
+    } else if (operation === 'queue.consumer.stop') queueConsumer(value.consumer);
+    else queueReceipt(value.receipt,value.conversationId);
+    return structuredClone(value);
+  }
   if (operation === 'directory.sync') {
     object(value, ['projects', 'directories']); output('projects.sync', { projects: value.projects });
     if (!Array.isArray(value.directories) || value.directories.length !== value.projects.length || new Set(value.projects.map(p => p.id)).size !== value.projects.length) fail('invalid_directory');

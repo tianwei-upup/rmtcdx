@@ -18,3 +18,5 @@ output/playwright/
 business/dist/
 
 business/node_modules/
+
+prototype/desktop-companion/node_modules/

@@ -1,0 +1,13 @@
+{
+  "name": "rmtcdx-desktop-companion-prototype",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build": "node --check src/app-tools.mjs && node --check src/companion.mjs && node --check src/control.mjs && node --check src/start-detached.mjs && node --check src/business-adapter.mjs && node --check src/state.mjs && node --check src/service.mjs && node --check src/local-server.mjs && node --check src/mcp.mjs && node --check src/mcp-server.mjs && node --check src/acceptance-host.mjs && node --check src/proxy.mjs && node --check src/inbox.mjs && node --check src/consumer.mjs && node --check src/inbox-business-adapter.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "zod": "4.6.7"
+  }
+}
