@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Codex 专用测试队列</title><link rel="stylesheet" href="/queue.css"><script type="module" src="/queue-app.js"></script></head>
+<body><main>
+<header><div><p class="eyebrow">CODEX REMOTE</p><h1>专用测试队列</h1></div><button id="refresh" type="button">刷新</button></header>
+<form id="login"><h2>连接电脑</h2><label for="password">访问密码</label><input id="password" type="password" autocomplete="current-password" required><button id="loginButton" type="submit" disabled>登录</button></form>
+<section id="workspace" hidden>
+<section class="connection"><div><strong id="projectName">专用测试项目</strong><span id="connection">连接中…</span></div><p id="consumerStatus">正在核对桌面领取状态…</p><button id="stopConsumer" type="button" hidden>停止领取新任务</button></section>
+<p id="notice" role="status" aria-live="polite" hidden></p>
+<section id="recovery" hidden><strong>有一条发送尚未确认</strong><p>先核对已有任务，避免重复提交。</p><button id="reconcile" type="button">核对发送状态</button></section>
+<form id="composer"><label for="text">发送到专用测试会话</label><textarea id="text" rows="3" maxlength="16000" placeholder="输入任务内容…" required></textarea><div class="composer-footer"><span>消息保留在电脑；桌面开启领取后处理</span><button id="enqueue" type="submit">入队</button></div></form>
+<div class="list-heading"><h2>任务与结果</h2><span id="count">0 条</span></div>
+<p id="empty">还没有任务。输入一条消息，交给桌面领取。</p><section id="queue" aria-live="polite"></section>
+
+</section><p id="loginNotice" role="status"></p>
+</main></body></html>

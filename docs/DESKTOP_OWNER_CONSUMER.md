@@ -1,5 +1,7 @@
 # 持续领取、取消恢复与业务队列协议
 
+> 最新：已授权专用项目的 ECS/APK 队列接入通过，见 [部署与验收记录](ECS_APK_OWNER_QUEUE_VALIDATION.md)；其他项目与 native 写入继续关闭，桌面仍需显式开启领取窗口。下文保留原阶段边界。
+
 **本机专用验收已通过：空队列长轮询后继续领取、排队取消、协作取消、停止后保留任务、MCP 恢复后阻塞 unknown、显式放弃后恢复新任务。业务协议只在显式启用的 loopback 测试服务中验证；ECS/APK 写入仍关闭。**
 
 本阶段沿用 `rmtcdx companion lifecycle`（`01a13fef-a018-7303-a2a6-f5903548537f`）及“专用测试项目”。原 acceptance 聊天保持 9 个 completed turn。只卸载/恢复空闲的专用控制聊天来加载 MCP；桌面 PID `42738`、app-server PID `43367` 未变，没有重启桌面或操作其他活跃聊天。

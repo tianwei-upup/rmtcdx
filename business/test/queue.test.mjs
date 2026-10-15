@@ -25,3 +25,10 @@ test('queue jobs persist metadata only, and succeeded means delivery not model c
   board.complete('device',query.id,q.leaseToken,{conversationId:'test-chat',receipts:[{...receipt,state:'completed',consumerTurnId:'native-turn',result:'PRIVATE-QUEUE-ANSWER'}],consumer:null});
   assert(!JSON.stringify(store.data).includes('PRIVATE-QUEUE-ANSWER'));
 });
+test('dedicated queue polling expires read metadata without discarding durable write identities',()=>{
+  let now=0;const store={data:{jobs:[],scopes:{}},save(){}};const board=new TaskBoard({store,now:()=>now,ttlMs:100,pruneQueueReads:true});
+  const write=board.submit('device','queue.enqueue',{conversationId:'test-chat',intentId:'intent',text:'read only'},'intent');
+  const query=board.submit('device','queue.status',{conversationId:'test-chat'},'query');store.data.scopes[query.id]={conversationId:'test-chat'};
+  const q=board.claim('device',['queue.status']);board.ack('device',q.id,q.leaseToken);board.complete('device',q.id,q.leaseToken,{conversationId:'test-chat',receipts:[],consumer:null});
+  now=101;board.sweep();assert.throws(()=>board.get(query.id),/job_not_found/);assert(!store.data.scopes[query.id]);assert.equal(board.get(write.id).state,'expired');assert.equal(board.submit('device','queue.enqueue',{conversationId:'test-chat',intentId:'intent',text:'read only'},'intent').id,write.id);
+});

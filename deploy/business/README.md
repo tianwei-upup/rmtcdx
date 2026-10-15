@@ -1,5 +1,7 @@
 # ECS 业务服务验证部署
 
+> 最新：已授权专用项目的 ECS/APK 队列接入通过，见 [部署与验收记录](../../docs/ECS_APK_OWNER_QUEUE_VALIDATION.md)；其他项目与 native 写入继续关闭，桌面仍需显式开启领取窗口。下文保留原阶段边界。
+
 > 2026-10-15：真实执行器目前停用，受控启动入口会拒绝运行。共享桌面 Codex profile 的旧配置不再允许；隔离验收完成前不要按下方历史命令启动。详见仓库 `docs/CODEX_RUNTIME_ISOLATION_AUDIT.md`。
 
 本目录只部署 `business/`，不部署旧 `control/`、不部署 Codex 或电脑 bridge。业务服务自身处理 HTTPS，不需要流量代理、隧道或端口映射。Mac 使用 `scripts/start-business-remote-agent.mjs` 主动连接服务。

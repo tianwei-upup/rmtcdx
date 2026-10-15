@@ -157,7 +157,7 @@ public class MainActivity extends Activity {
         WebView page = new WebView(this);
         WebSettings settings = page.getSettings();
         settings.setJavaScriptEnabled(true);
-        settings.setUserAgentString(settings.getUserAgentString() + " CodexRemoteAndroid/0.3");
+        settings.setUserAgentString(settings.getUserAgentString() + " CodexRemoteAndroid/" + BuildConfig.VERSION_NAME);
         page.setBackgroundColor((getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES ? Color.rgb(33, 33, 33) : Color.WHITE);
         settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false);

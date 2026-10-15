@@ -3,9 +3,10 @@ import { input, output, identifier, fingerprint, fail, READS, OPERATIONS } from 
 
 /** Independent business jobs. No HTTP request, socket, URL or native frame is stored. */
 export class TaskBoard {
-  constructor({ store = { data: { jobs: [] }, save() {} }, now = Date.now, leaseMs = 30_000, ttlMs = 300_000, maxJobs = 10000, maxBytes = 32 * 1024 * 1024 } = {}) {
+  constructor({ store = { data: { jobs: [] }, save() {} }, now = Date.now, leaseMs = 30_000, ttlMs = 300_000, maxJobs = 10000, maxBytes = 32 * 1024 * 1024, pruneQueueReads = false } = {}) {
     this.store = store; this.now = now; this.leaseMs = leaseMs; this.ttlMs = ttlMs;
     this.maxJobs = maxJobs; this.maxBytes = maxBytes;
+    this.pruneQueueReads = pruneQueueReads;
     this.jobs = new Map((store.data.jobs ?? []).map(job => [job.id, { ...job }]));
     this.payloads = new Map(); this.results = new Map();
     for (const job of this.jobs.values()) {
@@ -30,6 +31,9 @@ export class TaskBoard {
       if (job.expiresAt <= this.now()) {
         this.payloads.delete(job.id); this.results.delete(job.id);
         if (job.state === 'pending') { job.state = 'expired'; changed = true; }
+        if (this.pruneQueueReads && job.operation === 'queue.status' && ['succeeded','rejected','expired'].includes(job.state)) {
+          this.jobs.delete(job.id); if(this.store.data.scopes) delete this.store.data.scopes[job.id]; changed=true;
+        }
       }
     }
     if (changed) this.save();

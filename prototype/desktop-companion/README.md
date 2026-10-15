@@ -1,5 +1,7 @@
 # 桌面伴随 MCP 原型
 
+> 最新：已授权专用项目的 ECS/APK 队列接入通过，见 [部署与验收记录](../../docs/ECS_APK_OWNER_QUEUE_VALIDATION.md)；其他项目与 native 写入继续关闭，桌面仍需显式开启领取窗口。下文保留原阶段边界。
+
 同一 Mac 账户内，通过已有桌面 owner 操作原 session，不启动第二个 Codex/app-server。当前仅授权专用测试会话。最新结果见 [MCP 恢复与并发验收](../../docs/DESKTOP_COMPANION_MCP.md)，早期 ECS/APK 纵向验证见 [第一阶段记录](../../docs/DESKTOP_COMPANION_ACCEPTANCE.md)。
 
 当前可落地的消息入口为 [桌面主动领取 Inbox](../../docs/DESKTOP_OWNER_PULL.md)：本机原子入队，专用聊天通过 MCP 顺序领取并完成，多条任务可共享同一 turn；本机三条真实任务已通过。业务 worker 仍停止、默认只读。

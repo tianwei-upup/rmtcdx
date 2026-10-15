@@ -43,7 +43,7 @@
 
 ## 验证
 
-- `npm --prefix business test`：51 项。状态机、跨目录隔离、参数校验、幂等、租约丢失、重启与执行器回执、队列契约，以及附加型执行器的离线协议与失败关闭测试（真实 Unix socket + RFC 6455 + JSON-RPC，不使用真实 Codex）。
+- `npm --prefix business test`：本次部署内容 55 项（工作区另有一项旧端点发现回归未纳入部署）。状态机、跨目录隔离、参数校验、幂等、租约丢失、重启与执行器回执、队列契约，以及附加型执行器的离线协议与失败关闭测试（真实 Unix socket + RFC 6455 + JSON-RPC，不使用真实 Codex）。
 - `npm --prefix business run check` 和 `npm --prefix business run build`。
 - `NODE_EXTRA_CA_CERTS="$PWD/.runtime/business/tls/ca.pem" node scripts/verify-business-local.mjs`：真实新建/续聊、快照、分页、事件与落盘正文检查。
 - 同样环境运行 `scripts/verify-business-advanced.mjs`：真实图片输入及指定轮次中断。
@@ -59,4 +59,4 @@
 
 桌面主动领取协议 v2 的本机验收见 [持续领取与取消恢复](../docs/DESKTOP_OWNER_CONSUMER.md)。新增 `queue.enqueue/status/cancel/consumer.stop`，入队交付 job succeeded 不等于模型任务完成；使用独立 intentId、consumerTurnId 与 revision，不生成假 turn ID。
 
-默认 `OPERATIONS`、服务器和 ECS 启动器不开放队列写入。测试必须在 server、agent、adapter 显式启用 `enableLocalQueueTest`，且 origin/listen host 仅 loopback；正文和结果不写入服务端持久化元数据。手机 UI 和公网部署尚未启用。
+默认 `OPERATIONS`、服务器和原 ECS 启动器不开放队列写入。`enableLocalQueueTest` 仍只允许 loopback。用户授权的 ECS 专用测试模式必须在 server、agent、adapter 配置一致的 `queueTestScope`，强制 HTTPS 与精确设备/项目/聊天白名单；正文和结果不写入服务端持久化元数据。手机页面、部署及验收见 [ECS/APK 专用队列](../docs/ECS_APK_OWNER_QUEUE_VALIDATION.md)。原生发送、新建、附件及其他项目继续关闭。

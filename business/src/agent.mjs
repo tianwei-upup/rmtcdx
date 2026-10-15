@@ -6,6 +6,7 @@ import { JsonStore } from './storage.mjs';
 import { nativeAdapter } from './codex-adapter.mjs';
 import { OPERATIONS, SUPPORTED_OPERATIONS, READS } from './contracts.mjs';
 import { assertIsolatedNativeRuntime, assertNativeExecutionAllowed } from './runtime-isolation.mjs';
+import { queueTestScope, SCOPED_QUEUE_OPERATIONS } from './queue-scope.mjs';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export async function startAgent(config) {
   // Attach mode reuses an already-running app-server, so it neither spawns a
@@ -55,7 +56,9 @@ export async function startAgent(config) {
     });
   } else adapter = await nativeAdapter(config.projects, emitEvent, attachmentDir, conversationProjects, runtimeHome);
   const accepts = config.operations ?? adapter.operations ?? OPERATIONS;
-  const allowedOperations = config.enableLocalQueueTest === true && ['127.0.0.1','localhost'].includes(origin.hostname) ? SUPPORTED_OPERATIONS : OPERATIONS;
+  const remoteScope = queueTestScope(config.queueTestScope);
+  if (remoteScope && (origin.protocol !== 'https:' || config.deviceId !== remoteScope.deviceId || !adapter.matchesQueueScope?.(remoteScope))) { await adapter.stop(); store.close(); throw new Error('queue_scope_rejected'); }
+  const allowedOperations = remoteScope ? SCOPED_QUEUE_OPERATIONS : config.enableLocalQueueTest === true && ['127.0.0.1','localhost'].includes(origin.hostname) ? SUPPORTED_OPERATIONS : OPERATIONS;
   if (!Array.isArray(accepts) || !accepts.length || accepts.some(operation => !allowedOperations.includes(operation))) { await adapter.stop(); store.close(); throw new Error('invalid_adapter_capabilities'); }
   if (typeof adapter.setEventSink === 'function') adapter.setEventSink(emitEvent);
   const isReady = () => typeof adapter.ready === 'function' ? adapter.ready() : adapter.getState?.().ready === true;
@@ -71,6 +74,7 @@ export async function startAgent(config) {
     if (processing || stopped) return; processing = true;
     try {
       await heartbeat();
+      if(remoteScope) for(const [jobId,receipt] of Object.entries(store.data.receipts)) if(receipt.queueReadExpiresAt<Date.now() && ['succeeded','rejected'].includes(receipt.state)){delete store.data.receipts[jobId];store.save();}
       while (store.data.events.length && !stopped) {
         await call('/api/agent/events', store.data.events[0]); store.data.events.shift(); store.save();
       }
@@ -89,7 +93,7 @@ export async function startAgent(config) {
         let receipt = store.data.receipts[task.id];
         if (!receipt) {
           // Persist BEFORE native side effects. An unknown receipt never executes again.
-          receipt = { fingerprint: task.fingerprint, state: 'unknown', code: 'execution_unknown' };
+          receipt = { fingerprint: task.fingerprint, state: 'unknown', code: 'execution_unknown', ...(remoteScope && task.operation==='queue.status'?{queueReadExpiresAt:Date.now()+600000}:{}) };
           store.data.receipts[task.id] = receipt; store.save();
           try { receipt.result = await adapter.execute(task.operation, task.input, task.id); receipt.state = 'succeeded'; delete receipt.code; }
           catch (error) { diagnostic('business.execution.failed', error, task); receipt.state = error.code === 'precondition_rejected' || READS.has(task.operation) ? 'rejected' : 'unknown'; receipt.code = receipt.state === 'rejected' ? 'precondition_rejected' : 'execution_unknown'; }
