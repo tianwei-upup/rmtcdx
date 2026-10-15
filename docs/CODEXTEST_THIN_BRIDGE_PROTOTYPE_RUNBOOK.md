@@ -2,6 +2,8 @@
 
 更新：2026-10-15。执行者：接手的 MiniMax agent。本轮只实现、运行和验证 codextest 原型，不切换正常用户的 Codex。
 
+> 状态更新（2026-10-15 20:15，源码持有者侧）：交接基线已固化为提交 `19413bd`（分支 `codex/remote-control-cloud`，已推送 origin）。§4 原先指出缺失的 attach 客户端已补齐并接入 `agent.mjs`，但**只做过离线 server double 验证，从未连过真实桌面**；codextest 侧 launcher / 桌面 wrapper / worker 交付物仍待实现。
+
 ## 直接交给 MiniMax 的任务
 
 > 阅读 AGENTS.md、本文件及 `docs/DESKTOP_EXECUTOR_ATTACH_RESEARCH.md`。在 codextest 用户的工作副本中，实现“桌面 JSONL 协议适配器 + 唯一 UDS/WebSocket app-server + 独立 worker 客户端”的本机薄桥原型，先做协议测试，再运行 codextest 真实桌面兼容和同 ID 续聊验证。用户已允许本次 codextest 原型：可按本文前置条件启动、关闭、重启本轮 codextest 测试桌面及自身测试组件，不需要再次询问是否选择薄桥。正常用户 liutianwei 的 Codex、profile、认证、进程、启动环境和会话均不得修改、连接、终止或重启；共享安装包只读。保留默认 native 停用守卫，不做 ECS/手机/公网验证，不安装全局自启动，不提交/推送代码，不启动其他 agent。实际阻塞则记录具体条件；不得通过去掉隔离或另起共享 profile writer 继续。完成后提交实现说明、逐项结果、恢复记录及本地证据路径。
@@ -48,11 +50,11 @@ flowchart LR
 
 ### 3.1 准备可访问的源码
 
-当前实现大量未提交。不要用远端旧 clone 或 `git archive HEAD` 代替当前源码，也不要更改正常用户 HOME 的权限来获得访问。
+交接基线已固定在提交 `19413bd`（分支 `codex/remote-control-cloud`，已推送 origin）。不要用更早的 clone 或旧 `git archive` 代替该提交的源码，也不要更改正常用户 HOME 的权限来获得访问。
 
 使用 codextest 拥有的项目工作副本；若跨用户不可读，由源码持有者交接明确的源码文件、AGENTS.md、锁文件及所需测试素材。**不复制整个 `.runtime/`、`.codex/`、认证文件或带私有配置的 node_modules。** 在测试工作副本按锁文件安装依赖，不安装全局 CLI，不静默升级依赖。记录源码清单和摘要；`git status` 对未跟踪文件只能显示目录，不能证明内容完全相同。
 
-本轮原型实现、依赖、证据和运行配置均放在 codextest 专用目录。正常用户仓库只作为交接来源；需要回交代码时提供精确 diff/文件清单，不覆盖其未提交内容。
+本轮原型实现、依赖、证据和运行配置均放在 codextest 专用目录。正常用户仓库只作为交接来源；需要回交代码时提供精确 diff/文件清单，不要在该仓库工作区直接覆盖文件：attach transport 已作为 `19413bd` 提交，上游改动只能经 `scripts/verify-upstream-patch.mjs` 校验后重新导出 `patches/remote-control.patch`。
 
 ### 3.2 先在 codextest 终端执行预检
 
@@ -98,7 +100,13 @@ NODE
 
 ## 4. 实现交付物与硬约束
 
-当前 `business/src/attach-adapter.mjs` 只是 `validated_only` 骨架，执行会返回 `attach_not_implemented`，且未接入 agent.mjs；既有测试数通过不代表真实连接已实现。
+`business/src/attach-adapter.mjs` 原先是 `validated_only` 骨架（不注入 `createClient` 时仍是 fail-closed 骨架，`execute()` 返回 `attach_not_implemented`），该缺块已在提交 `19413bd` 补齐：
+
+- `business/src/attach-client.mjs` 把已校验的 endpoint 绑到上游 `WebSocketTransport` + `RealCodexClient`（attach 模式不 spawn 进程、不读 `CODEX_HOME`）；
+- `business/src/agent.mjs` 已接入，调度优先级 `config.adapter` → `config.transport` → native，endpoint 不可达时 `start()` 抛错；
+- 上游抽出 `CodexTransport` 接缝（`StdioTransport` 逐字保留，新增 attach-only `WebSocketTransport`），stdio 与 attach 共用同一客户端；上游侧改动见 `patches/remote-control.patch`（26 文件可重放）。
+
+**但“离线通过”不等于“真实连接已验证”**：`attach-transport.test.ts`（6 项）与 `attach-integration.test.mjs`（3 项）都跑在自建 Unix socket 的 JSON-RPC server double 上，不使用真实 Codex、不连桌面、不做模型推理。真实桌面 `endpoint.reason` 仍为 `socket_missing`，本轮的客户端从未连过真实桌面 —— 本节要求的 codextest 侧 launcher / 桌面 wrapper / worker 交付物与桌面阶段仍未实现。
 
 接手 agent 应在测试工作副本提供：
 
@@ -110,7 +118,7 @@ NODE
 | 协议/生命周期测试 | 覆盖第 6 节矩阵，包含真正的双客户端断言，不仅测试一个复制的 dispatcher 函数 |
 | 操作脚本及报告 | 所有命令验证 UID；可 dry-run；列明本轮 PID、端点、日志和回退范围；不得依赖操作者记住隐含环境变量 |
 
-上述 launcher/适配器目前尚未交付。**本文件不提供一个假装已经存在的启动命令。** 实现者先提供它们的实际文件路径、`--help`、dry-run 输出和可复制的 start/status/stop 命令，完成本地测试后再执行 codextest 桌面阶段。
+上述 codextest 侧 launcher / 桌面 wrapper / worker 交付物目前尚未交付；业务侧 attach 客户端（`business/src/attach-client.mjs`）已就绪，但它只连已存在的 endpoint，不构成桌面侧交付物。**本文件不提供一个假装已经存在的启动命令。** 实现者先提供它们的实际文件路径、`--help`、dry-run 输出和可复制的 start/status/stop 命令，完成本地测试后再执行 codextest 桌面阶段。
 
 ### 4.1 参数与配置保留
 
@@ -128,7 +136,7 @@ NODE
 - 桌面适配器和 worker 只拥有各自连接。退出任一客户端不停止 owner；两端都断开时，本轮 owner 仍由 test launcher 掌握，最终由明确清理动作停止。
 - 不依赖父进程 PID 或 socket 文件存在来认定 owner 正确。联合核对 UID、可执行文件/版本、本轮 PID 与启动时间、监听归属、profile 和配置等价性；过期 PID/状态文件不得直接用于 kill 或重连。
 - UDS 优先使用 codextest 私有目录，记录 canonical advertised path、实际 alias 和 listener。官方实现实际使用 `/private/tmp/codex-daemon-<uid>/`，只允许本轮 hash 对应的 socket/lock；不扩大权限、不清理其他条目。
-- 不把当前 adapter 骨架的 `unix-direct`/`ws` 校验当成完整认证；它还没有证明父目录安全、listener 身份和测试用户归属。本轮禁用远程 URL，不能因 `wss:` 校验通过就连接外部端点。
+- 不把 `attach-adapter.mjs` 的 `unix-direct`/`ws` 校验当成完整认证；它只做路径、权限与协议形状检查，还没有证明 listener 身份、所属桌面实例和测试用户归属，也从未连过真实端点。本轮禁用远程 URL，不能因 `wss:` 校验通过就连接外部端点。
 - `assertNativeExecutionAllowed()` 固定停用逻辑保留。原型有独立且强制 codextest 的启动入口，不将它变成生产 native 守卫的环境变量旁路。
 
 ### 4.3 协议适配
@@ -154,7 +162,7 @@ NODE
 
 P1 对合成 fixture 的 `thread/name/set` 可用；P3/P4 不给用户原有会话改名。模型推理需独立登录和网络条件，缺失时不能以离线 resume 代替问答验收。
 
-此前 41/41 是旧测试与骨架测试的基线。本轮 JS/TS 有改动时，运行测试工作副本中的 `npm --prefix business run build` 和实际相关测试，记录新分母和新增覆盖，不以旧数字宣称本原型通过。
+提交 `19413bd` 的业务测试基线是 **49/49**（上游 77/77），其中 attach 相关的 3 项集成测试跑在 server double 上。本轮 JS/TS 有改动时，运行测试工作副本中的 `npm --prefix business run build` 和实际相关测试，记录新分母和新增覆盖，不以旧数字或离线数字宣称本原型通过。
 
 ## 6. 必测矩阵
 
