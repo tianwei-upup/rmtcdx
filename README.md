@@ -2,6 +2,12 @@
 
 Android App 通过统一云端入口，访问 Windows / Mac 上的本机 Codex 历史、创建会话和继续对话。电脑主动连接云端，项目、历史和 Codex 登录态保留在对应电脑。
 
+完整应用维护在 `tianwei-upup/rmtcdx` 的 `codex/remote-control-cloud` 分支，具有独立项目历史；远端 `main` 保留原 rmtcdx 上游代码。获取完整应用：
+
+```bash
+git clone --branch codex/remote-control-cloud https://github.com/tianwei-upup/rmtcdx.git rmtagt
+```
+
 ## 结构
 
 - `control/`：自有云端服务和电脑连接客户端，Node.js 22+；接口和部署见 [control/README.md](control/README.md)。

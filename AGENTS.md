@@ -15,6 +15,6 @@
 
 ## Agent skills
 
-- Issue tracker：当前没有远端仓库，诊断和任务使用本地 Markdown，见 `docs/agents/issue-tracker.md`。
+- Issue tracker：远端为 `tianwei-upup/rmtcdx`，完整项目分支 `codex/remote-control-cloud`；诊断和任务继续使用本地 Markdown，见 `docs/agents/issue-tracker.md`。
 - Triage labels：使用标准状态名称，见 `docs/agents/triage-labels.md`。
 - Domain docs：单一上下文，见 `docs/agents/domain.md`；不存在的上下文或 ADR 不阻塞诊断。
