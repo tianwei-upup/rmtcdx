@@ -1,0 +1,4 @@
+interface:
+  display_name: "阿里云 ECS 远程连接"
+  short_description: "通过 Workbench CLI 配置认证、连接 ECS 并排查连接故障"
+  default_prompt: "使用 $aliyun-ecs-workbench 配置或复用本机认证，连接指定 ECS，并通过只读命令验证主机身份。"
