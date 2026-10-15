@@ -1,0 +1,4 @@
+# Replace domain and keep RMT_PUBLIC_URL=https://rmt.example.com.
+rmt.example.com {
+    reverse_proxy 127.0.0.1:3220
+}

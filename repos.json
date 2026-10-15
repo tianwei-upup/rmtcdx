@@ -1,0 +1,9 @@
+[
+  {
+    "id": "remoteControlGPT",
+    "name": "Codex Remote Android",
+    "path": ".",
+    "description": "Android 双主机远程客户端与本地服务",
+    "pinned": true
+  }
+]

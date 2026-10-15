@@ -1,0 +1,15 @@
+diff --git a/apps/bridge/src/uploads/image-upload-service.ts b/apps/bridge/src/uploads/image-upload-service.ts
+index 9288470..4f2f81c 100644
+--- a/apps/bridge/src/uploads/image-upload-service.ts
++++ b/apps/bridge/src/uploads/image-upload-service.ts
+@@ -61,7 +61,9 @@ export class ImageUploadService {
+   publicUrlForPath(filePath: string) {
+     const relativePath = path.relative(this.uploadsDir, filePath);
+     if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+-      throw new Error(`Upload path is outside the public uploads directory: ${filePath}`);
++      // Desktop thread images may live in a clipboard/temp directory. The
++      // thread parser already renders a text fallback when no public URL exists.
++      return null;
+     }
+ 
+     const encodedPath = relativePath.split(path.sep).map(encodeURIComponent).join("/");

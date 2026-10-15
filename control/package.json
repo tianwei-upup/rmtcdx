@@ -1,0 +1,14 @@
+{
+  "name": "rmtagt-control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/cloud.mjs",
+    "client": "node src/client.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/cloud.mjs && node --check src/client.mjs && node --check src/common.mjs"
+  },
+  "dependencies": { "ws": "^8.18.3" }
+}
