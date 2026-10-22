@@ -13,6 +13,7 @@ import {ScopedHistoryStream} from '../prototype/desktop-companion/src/scoped-his
 import {DesktopPublisher} from '../prototype/desktop-companion/src/desktop-publisher.mjs';
 import {NativeHistoryQueue} from '../prototype/desktop-companion/src/native-history-queue.mjs';
 import {HistoryReceiver} from '../prototype/desktop-companion/src/history-receiver.mjs';
+import {checkDesktopRuntime,runReceiverTick} from '../prototype/desktop-companion/src/desktop-runtime.mjs';
 import {personalActivation,personalActivationV2} from '../prototype/desktop-companion/src/personal-activation.mjs';
 import {HistoryInboxReader} from '../prototype/desktop-companion/src/history-inbox-reader.mjs';
 import {acquireOwner,readPrivate,writePrivate} from '../prototype/desktop-companion/src/state.mjs';
@@ -27,8 +28,27 @@ const desktopChats=()=>queueChats(grant).map(c=>({...c,cwd:scope.chats.get(c.id)
 const receiverErrors=new Map();
 let discovering=false;
 async function discover(){if(stopping||discovering||!catalogCall)return;discovering=true;try{const next=queueTestScope(personalGrant(scope,grant.deviceId)),result=await (catalogHash(next)===catalogRevision?catalogCall('/api/agent/catalog/ping',{revision:catalogRevision}):catalogCall('/api/agent/catalog',{baseRevision:catalogRevision,grant:next}));catalogRevision=result.revision;if(JSON.stringify(next)!==JSON.stringify(grant)){grant=next;queue.updateGrant(grant);writePrivate(path.join(runtime,'catalog.json'),{revision:catalogRevision,projects:grant.projects.length,chats:queueChats(grant).length,at:Date.now()});log({event:'personal.catalog.changed',projects:grant.projects.length,chats:queueChats(grant).length,revision:catalogRevision});}if(publisher&&publisher.catalogRevision!==catalogRevision){await publisher.updateChats(desktopChats());publisher.catalogRevision=catalogRevision;}}catch(e){log({event:'personal.catalog.unavailable',code:e.code??e.message});if(e.code==='catalog_revision_conflict')catalogRevision=(await catalogCall('/api/agent/catalog')).revision;}finally{discovering=false;}}
-async function checkDesktop(){if(JSON.parse(fs.readFileSync('/Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-package.json')).version!=='0.163.0-alpha.10.2')throw Error('desktop_build_changed');const {stdout}=await exec('/bin/ps',['-axo','uid=,pid=,comm=']);if(stdout.split('\n').filter(l=>{const m=/^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(l);return m&&Number(m[1])===process.getuid()&&m[3]==='/Applications/ChatGPT.app/Contents/MacOS/ChatGPT';}).length!==1)throw Error('original_desktop_unavailable');}
-async function tick(){if(stopping||ticking)return;ticking=true;try{await checkDesktop();for(const [id]of queue.queues){try{queue.eligible(id);if(!receivers.has(id)){const reader=new HistoryInboxReader({database:path.join(runtime,id,'inbox.sqlite'),conversationId:id});readers.set(id,reader);receivers.set(id,new HistoryReceiver({conversationId:id,nativeQueue:new NativeHistoryQueue({database:path.join(path.dirname(scope.metadataDatabase),'queue_1.sqlite'),runtime:path.join(runtime,'receipts',id),conversationId:id,personalScope:scope,enabled:true}),readQueue:async()=>reader.snapshot(),promptFactory:activation=>activationText(id,activation),wake:async chat=>{await checkDesktop();queue.eligible(chat);await exec('/usr/bin/open',['-g','-a','/Applications/ChatGPT.app','codex://threads/'+chat],{timeout:5000});},publish:v=>{const old=readPrivate(path.join(runtime,id,'receiver.json'),null);if(JSON.stringify(old?.value)!==JSON.stringify(v)){writePrivate(path.join(runtime,id,'receiver.json'),{value:v,at:Date.now()});log({event:'personal.receiver',conversationId:id,...v});}}}));}await receivers.get(id).tick();}catch(e){const code=e.code??'receiver_unavailable',old=receiverErrors.get(id);if(code!=='archived_conversation_readonly'&&(!old||old.code!==code||Date.now()-old.at>60000)){receiverErrors.set(id,{code,at:Date.now()});log({event:'personal.receiver.unavailable',conversationId:id,code});}}}}catch{}finally{ticking=false;}}
+const checkDesktop=()=>checkDesktopRuntime();
+function receiverUnavailable(id,error){
+ const code=/^[a-z_]+$/.test(error.code??'')?error.code:'receiver_unavailable';
+ const value={state:'unavailable',code,...(code==='desktop_build_changed'?{desktopVersion:error.desktopVersion,supportedVersions:error.supportedVersions}:{})};
+ const file=path.join(runtime,id,'receiver.json'),old=readPrivate(file,null),previous=receiverErrors.get(id);
+ if(JSON.stringify(old?.value)!==JSON.stringify(value))writePrivate(file,{value,at:Date.now()});
+ if(!previous||previous.code!==code||Date.now()-previous.at>60000){receiverErrors.set(id,{code,at:Date.now()});log({at:new Date().toISOString(),event:'personal.receiver.unavailable',conversationId:id,...value});}
+}
+async function receive(id){
+ queue.eligible(id);
+ if(!receivers.has(id)){
+  const reader=new HistoryInboxReader({database:path.join(runtime,id,'inbox.sqlite'),conversationId:id});readers.set(id,reader);
+  receivers.set(id,new HistoryReceiver({conversationId:id,nativeQueue:new NativeHistoryQueue({database:path.join(path.dirname(scope.metadataDatabase),'queue_1.sqlite'),runtime:path.join(runtime,'receipts',id),conversationId:id,personalScope:scope,enabled:true}),readQueue:async()=>reader.snapshot(),promptFactory:activation=>activationText(id,activation),
+   wake:async chat=>{await checkDesktop();queue.eligible(chat);await exec('/usr/bin/open',['-g','-a','/Applications/ChatGPT.app','codex://threads/'+chat],{timeout:5000});},
+   publish:value=>{const file=path.join(runtime,id,'receiver.json'),old=readPrivate(file,null);if(JSON.stringify(old?.value)!==JSON.stringify(value)){writePrivate(file,{value,at:Date.now()});log({at:new Date().toISOString(),event:'personal.receiver',conversationId:id,...value});}}
+  }));
+ }
+ await receivers.get(id).tick();
+ if(receiverErrors.delete(id))log({at:new Date().toISOString(),event:'personal.receiver.recovered',conversationId:id});
+}
+async function tick(){if(stopping||ticking)return;ticking=true;try{await runReceiverTick({checkDesktop,ids:queue.queues.keys(),receive,unavailable:receiverUnavailable});}finally{ticking=false;}}
 async function stop(){if(stopping)return;stopping=true;clearInterval(timer);clearInterval(discoveryTimer);abort.abort();await Promise.allSettled([publisher?.stop(),agent?.stop(),...Array.from(receivers.values(),r=>r.pending)]);for(const r of readers.values())r.close();queue.stop();await closeLocal?.();release();}
 try{
  closeLocal=await serveLocal(runtime,queue,()=>void stop().then(()=>process.exit(0)));

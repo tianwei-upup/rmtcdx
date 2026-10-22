@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { desktopProjects } from '../../../business/src/projects.mjs';
 import { HISTORY_QUEUE_TEST_ID, RN_HISTORY_IDS, RN_HISTORY_PROJECT } from './native-history-queue.mjs';
+import { assertDesktopCliVersion } from './desktop-runtime.mjs';
 
 const fail=code=>{throw Object.assign(Error(code),{code});};
 const exec=promisify(execFile);
@@ -24,7 +25,7 @@ export function historyLoader({enabled=false,membership,metadataDatabase,now=Dat
    }
    const row=metadata(chat.id);if(!row||row.cwd!==chat.cwd||row.archived!==0)fail('history_view_scope_rejected');
    if(now()-(attempts.get(chat.id)??-Infinity)<30000)return;
-   if(readVersion()!=='0.163.0-alpha.10.2')fail('desktop_build_changed');
+   assertDesktopCliVersion(readVersion());
    const {stdout}=await run('/bin/ps',['-axo','uid=,pid=,comm=']);
    const matches=stdout.split('\n').map(l=>/^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(l)).filter(m=>m&&Number(m[1])===process.getuid()&&m[3]==='/Applications/ChatGPT.app/Contents/MacOS/ChatGPT');
    if(matches.length!==1)fail('original_desktop_unavailable');

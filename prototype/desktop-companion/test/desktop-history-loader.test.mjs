@@ -11,3 +11,8 @@ test('read entry rechecks archive, membership, build and existing desktop; never
  const f=fixture();await f.load({...f.chat,archived:true});await f.load({...f.chat,mobileReceive:false});await assert.rejects(f.load({...f.chat,id:'not-allowed'}));assert.equal(f.calls.length,0);
 });
 test('view loading stays disabled without explicit local opt in',async()=>{let called=false;await historyLoader({run:async()=>{called=true;}})({id:HISTORY_QUEUE_TEST_ID,mobileReceive:true});assert.equal(called,false);});
+test('verified alpha.11.1 build can load the original view without starting another desktop',async()=>{
+ const f=fixture();f.set({version:'0.163.0-alpha.11.1'});await f.load(f.chat);
+ assert.equal(f.calls.filter(c=>c.file==='/usr/bin/open').length,1);
+ assert.deepEqual(f.calls[1].args,['-g','-a','/Applications/ChatGPT.app','codex://threads/'+rn]);
+});

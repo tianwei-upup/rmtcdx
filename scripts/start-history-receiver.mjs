@@ -1,9 +1,9 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { NativeHistoryQueue, HISTORY_QUEUE_TEST_ID as id } from '../prototype/desktop-companion/src/native-history-queue.mjs';
 import { HistoryReceiver } from '../prototype/desktop-companion/src/history-receiver.mjs';
+import { checkDesktopRuntime, runReceiverTick } from '../prototype/desktop-companion/src/desktop-runtime.mjs';
 import { HistoryInboxReader } from '../prototype/desktop-companion/src/history-inbox-reader.mjs';
 import { acquireOwner, readPrivate, writePrivate } from '../prototype/desktop-companion/src/state.mjs';
 const config = readPrivate(path.resolve(process.argv[2]), null);
@@ -12,12 +12,7 @@ const project = config.projectQueueConfig ? readPrivate(config.projectQueueConfi
 const ids = project ? config.threadIds : [config.conversationId];
 if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length || !project && ids[0] !== id) throw Error('native_history_scope_required');
 const release = acquireOwner(config.runtime), exec = promisify(execFile);
-const checkDesktop = async () => {
-  if (JSON.parse(fs.readFileSync('/Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-package.json', 'utf8')).version !== '0.163.0-alpha.10.2') throw Error('desktop_build_changed');
-  const { stdout } = await exec('/bin/ps', ['-axo', 'uid=,pid=,comm=']);
-  const processes = stdout.split('\n').map(line => /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line)).filter(m => m && Number(m[1]) === process.getuid() && m[3] === '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT');
-  if (processes.length !== 1) throw Error('original_desktop_unavailable');
-};
+const checkDesktop = () => checkDesktopRuntime();
 let stopped = false; const previous = new Map(), readers = [], receivers = [];
 const publish = (conversationId, value) => {
   const signature = JSON.stringify(value);
@@ -39,8 +34,7 @@ for (const conversationId of ids) {
 let ticking = false;
 async function tick() {
  if (stopped || ticking) return; ticking = true;
- try { await checkDesktop(); for (const receiver of receivers) try { await receiver.tick(); } catch (e) { publish(receiver.conversationId, { state: 'unavailable', code: /^[a-z_]+$/.test(e.code ?? '') ? e.code : 'history_receiver_unavailable' }); } }
- catch { for (const receiver of receivers) publish(receiver.conversationId, { state: 'unavailable', code: 'original_desktop_unavailable' }); }
+ try { await runReceiverTick({checkDesktop,ids:receivers.map(r=>r.conversationId),receive:id=>receivers.find(r=>r.conversationId===id).tick(),unavailable:(id,e)=>publish(id,{state:'unavailable',code:/^[a-z_]+$/.test(e.code??'')?e.code:'history_receiver_unavailable',...(e.code==='desktop_build_changed'?{desktopVersion:e.desktopVersion,supportedVersions:e.supportedVersions}:{})})}); }
  finally { ticking = false; }
 }
 await tick(); const timer = setInterval(() => void tick(), 1000);

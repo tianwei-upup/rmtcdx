@@ -1,4 +1,10 @@
 export const labels = { queued:'排队中', leased:'处理中', completed:'已完成', cancelled:'已取消', unknown:'结果未知' };
+// Personal admission is advertised by the authenticated catalog; loading a
+// large desktop history must not turn it into a manual-enable workflow.
+export function canAutoReceive({config,chat,capabilities={}}){
+  if(!chat||chat.archived||chat.workspaceAvailable===false||capabilities.archived||capabilities.workspaceAvailable===false||config?.queueWrites===false)return false;
+  return config?.mode==='personal-projects'||capabilities.mobileReceive===true;
+}
 export class QueueState {
   constructor() { this.items=new Map(); this.prompts=new Map(); this.consumer=null; this.online=false; }
   merge(receipts) { for(const r of receipts) { const old=this.items.get(r.intentId); if(!old || r.revision>old.revision || r.revision===old.revision&&(r.progress?.seq??0)>=(old.progress?.seq??0)) this.items.set(r.intentId,r); } }

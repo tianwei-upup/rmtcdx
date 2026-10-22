@@ -1,7 +1,7 @@
 import {CatalogLive,loadCatalog} from './catalog-live.mjs';
 import { QueueLive } from './queue-live.mjs';
 import { BusinessClient } from './business-client.mjs';
-import { QueueState } from './queue-state.mjs';
+import { QueueState, canAutoReceive } from './queue-state.mjs';
 import { markdown, copyText } from './markdown.mjs';
 const $=id=>document.getElementById(id),client=new BusinessClient({storage:localStorage});
 let state=new QueueState(),config,rootConfig,catalog=[],projectId,selectionVersion=0,route,polling=false,busy=false,timer,selected,live,liveAvailable=false,liveConnected=false,follow=true,desktopHistory=null,catalogLive;
@@ -18,6 +18,7 @@ const traces=new Map(),states=new Map(),drafts=new Map(),rows=new Map();
 const normalChats=p=>(p?.conversations??[]).filter(c=>!c.archived);
 const allChats=()=>catalog.flatMap(p=>p.conversations.map(c=>({...c,projectId:p.id,workspaceAvailable:c.workspaceAvailable??p.available})));
 const chat=()=>allChats().find(c=>c.id===selected);
+const autoReceiveEnabled=()=>canAutoReceive({config,chat:chat(),capabilities:desktopHistory?.capabilities});
 const projectName=()=>catalog.find(p=>p.id===chat()?.projectId)?.name??config?.projectName??'专用测试项目';
 const desktopEnabled=()=>config?.desktopSync&&(!config.desktopConversations||config.desktopConversations.some(c=>c.id===selected));
 const errorText={catalog_source_stale:'电脑目录正在重新同步，请稍后发送。',device_offline:'电脑暂时离线，连接恢复后再发送。',network_unavailable:'网络暂时不可用，正在核对消息是否送达。',precondition_rejected:'消息状态已变化，正在重新同步。',execution_unknown:'发送状态还在确认，请先核对已有消息。',result_expired:'正在从电脑重新核对消息。',queue_scope_rejected:'当前会话尚未开放手机访问。',intent_conflict:'上一条消息还在确认，请先核对发送状态。'};
@@ -35,7 +36,7 @@ function confirmation(check){return liveAvailable?()=>live.confirm(check):undefi
 function reconcile(){const p=route&&client.pending(route);if(p&&state.items.has(p.id)&&!state.items.get(p.id).local)client.clear(route,'',p.id);}
 function stopTarget(){return state.list().find(r=>r.state==='leased'&&state.canCancel(r))??state.list().find(r=>state.canCancel(r));}
 function controls(){
-  const pending=route&&client.pending(route),archived=Boolean(chat()?.archived||desktopHistory?.capabilities?.archived),autoReceive=desktopHistory?.capabilities?.mobileReceive===true,hasText=Boolean($('text').value.trim()),target=stopTarget();
+  const pending=route&&client.pending(route),archived=Boolean(chat()?.archived||desktopHistory?.capabilities?.archived),autoReceive=autoReceiveEnabled(),hasText=Boolean($('text').value.trim()),target=stopTarget();
   const unavailable=Boolean(selected&&!chat())||chat()?.workspaceAvailable===false||desktopHistory?.capabilities?.workspaceAvailable===false;
   const loadingHistory=desktopEnabled()&&!desktopHistory?.available;
   $('empty').querySelector('h1').textContent=!selected?'当前项目暂无未归档会话':loadingHistory?'正在加载历史记录':'从这段对话继续';
@@ -77,7 +78,7 @@ function render(){
     row.prompt.textContent=r.text||state.prompts.get(r.intentId)||'已发送的消息';row.delivery.dataset.state=r.state;
     row.delivery.textContent=r.state==='sending'?'发送中…':r.state==='unconfirmed'?'正在确认是否送达':r.state==='failed'?'发送失败':'';row.retry.hidden=r.state!=='failed';
     const uncertain=r.state==='unknown'||r.outcomeUncertain;
-    const status=uncertain?'需要在电脑确认结果，不会自动重发':r.cancelRequested&&r.state==='leased'?'正在停止回复…':r.state==='queued'?(state.consumer?.state==='active'?'等待电脑回复…':'等待电脑开启接收…'):r.state==='leased'?'正在回复…':r.state==='cancelled'?'已停止回复':'';
+    const status=uncertain?'需要在电脑确认结果，不会自动重发':r.cancelRequested&&r.state==='leased'?'正在停止回复…':r.state==='queued'?(state.consumer?.state==='active'?'等待电脑回复…':autoReceiveEnabled()?'已排队，等待原会话处理…':'等待电脑开启接收…'):r.state==='leased'?'正在回复…':r.state==='cancelled'?'已停止回复':'';
     row.status.hidden=!status;row.statusText.textContent=status;row.dot.hidden=uncertain||!['queued','leased'].includes(r.state)||Boolean(r.cancelRequested);
     const body=r.state==='completed'?(r.result??''):(r.progress?.text??'');if(body!==row.body){row.result.replaceChildren(markdown(body));row.body=body;}
     row.result.classList.toggle('partial',r.state==='leased');row.result.setAttribute('aria-busy',String(r.state==='leased'));row.copy.hidden=!body;row.cancel.hidden=!state.canCancel(r);row.cancel.textContent=r.state==='queued'?'取消发送':'停止回复';
