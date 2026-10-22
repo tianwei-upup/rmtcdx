@@ -10,6 +10,9 @@ const RECENT_PROJECTS='rmt-recent-projects',RECENT_CHATS='rmt-recent-chats';
 const readRecent=key=>{try{const value=JSON.parse(localStorage.getItem(key)||'[]');return Array.isArray(value)?value.filter(x=>x&&typeof x.id==='string'&&Number.isFinite(x.at)):[];}catch{return[];}};
 const touchRecent=(key,id)=>{if(!id)return;try{const list=readRecent(key).filter(x=>x.id!==id);list.unshift({id,at:Date.now()});localStorage.setItem(key,JSON.stringify(list.slice(0,8)));}catch{}};
 const recentAt=(key,id)=>readRecent(key).find(x=>x.id===id)?.at??0;
+// The desktop catalog carries the real last-active time. The phone-side
+// recency is only a fallback for catalogs that predate that field.
+const chatTime=c=>c.updatedAt?c.updatedAt*1000:recentAt(RECENT_CHATS,c.id);
 function relativeTime(at){if(!at)return'';const diff=Date.now()-at;if(diff<60000)return'刚刚';if(diff<3600000)return Math.floor(diff/60000)+' 分钟前';if(diff<86400000)return Math.floor(diff/3600000)+' 小时前';if(diff<2592000000)return Math.floor(diff/86400000)+' 天前';return new Date(at).toLocaleDateString('zh-CN',{month:'numeric',day:'numeric'});}
 const traces=new Map(),states=new Map(),drafts=new Map(),rows=new Map();
 const normalChats=p=>(p?.conversations??[]).filter(c=>!c.archived);
@@ -92,13 +95,14 @@ function renderChats(){
   const query=$('search').value.trim().toLocaleLowerCase(),chats=normalChats(catalog.find(p=>p.id===projectId));
   if($('projectSelect')){$('projectSelect').replaceChildren(...catalog.map(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.name+'（'+normalChats(p).length+'）';return o;}));$('projectSelect').value=projectId;}
   renderProjectPicker();
-  const buttons=chats.filter(c=>c.title.toLocaleLowerCase().includes(query)).sort((a,b)=>recentAt(RECENT_CHATS,b.id)-recentAt(RECENT_CHATS,a.id)).map(c=>{const b=document.createElement('button');b.type='button';b.className='session-row';b.dataset.chatId=c.id;b.setAttribute('aria-current',String(c.id===selected));b.disabled=busy;const title=document.createElement('span');title.className='session-title';title.textContent=c.title;b.append(title);const when=relativeTime(recentAt(RECENT_CHATS,c.id));if(when){const meta=document.createElement('span');meta.className='session-meta';meta.textContent=when;b.append(meta);}b.onclick=()=>{if(!busy){selectChat(c.id);$('drawer').close();}};return b;});$('chatList').replaceChildren(...buttons);$('noChats').hidden=buttons.length>0;$('noChats').textContent=query?'没有找到匹配的会话':'当前项目暂无未归档会话';
+  const buttons=chats.filter(c=>c.title.toLocaleLowerCase().includes(query)).sort((a,b)=>chatTime(b)-chatTime(a)).map(c=>{const b=document.createElement('button');b.type='button';b.className='session-row';b.dataset.chatId=c.id;b.setAttribute('aria-current',String(c.id===selected));b.disabled=busy;const title=document.createElement('span');title.className='session-title';title.textContent=c.title;b.append(title);const when=relativeTime(chatTime(c));if(when){const meta=document.createElement('span');meta.className='session-meta';meta.textContent=when;b.append(meta);}b.onclick=()=>{if(!busy){selectChat(c.id);$('drawer').close();}};return b;});$('chatList').replaceChildren(...buttons);$('noChats').hidden=buttons.length>0;$('noChats').textContent=query?'没有找到匹配的会话':'当前项目暂无未归档会话';
 }
 function renderProjectPicker(){
   if(!$('projectToggle'))return;const current=catalog.find(p=>p.id===projectId);
   $('currentProjectName').textContent=current?.name??'选择项目';$('currentProjectCount').textContent=normalChats(current).length+' 个会话';$('projectToggle').setAttribute('aria-label','当前项目：'+(current?.name??'未选择')+'，切换项目');
   if(!projectPickerOpen)return;const query=$('projectSearch').value.trim().toLocaleLowerCase(),projects=catalog.filter(p=>p.name.toLocaleLowerCase().includes(query)),list=$('projectList'),scroll=list.scrollTop,focused=document.activeElement?.closest('.project-option')?.dataset.projectId;
-  const recent=query?[]:readRecent(RECENT_PROJECTS).map(r=>projects.find(p=>p.id===r.id)).filter(Boolean).slice(0,3);
+  const projectTime=p=>normalChats(p).reduce((max,c)=>Math.max(max,chatTime(c)),0);
+  const recent=query?[]:projects.map(p=>({p,at:Math.max(projectTime(p),recentAt(RECENT_PROJECTS,p.id))})).filter(x=>x.at>0).sort((a,b)=>b.at-a.at).slice(0,3).map(x=>x.p);
   const recentIds=new Set(recent.map(p=>p.id));
   const rest=projects.filter(p=>!recentIds.has(p.id)).sort((a,b)=>a.name.localeCompare(b.name));
   const option=p=>{const row=$('projectOptionTemplate').content.firstElementChild.cloneNode(true);row.dataset.projectId=p.id;row.setAttribute('aria-current',String(p.id===projectId));row.disabled=busy;row.querySelector('.project-option-name').textContent=p.name;row.querySelector('.project-option-meta').textContent=normalChats(p).length+' 个会话'+(p.available===false?' · 目录不可用':'');row.onclick=()=>chooseProject(p.id);return row;};

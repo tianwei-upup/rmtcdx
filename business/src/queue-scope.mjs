@@ -15,9 +15,11 @@ export function queueTestScope(value) {
     identifier(value.deviceId); identifier(value.projectId); string(value.projectName,100);
     if (!Array.isArray(value.conversations) || !value.conversations.length || value.conversations.length>5000) fail('invalid_queue_scope');
     const conversations=value.conversations.map(c=>{
-      object(c,['id','title','archived','workspaceAvailable','binding'],['id','title','archived']); identifier(c.id); string(c.title,200);
+      object(c,['id','title','archived','workspaceAvailable','binding','updatedAt'],['id','title','archived']); identifier(c.id); string(c.title,200);
       if(c.workspaceAvailable!==undefined&&typeof c.workspaceAvailable!=='boolean'||c.binding!==undefined&&!/^[0-9a-f]{64}$/.test(c.binding))fail('invalid_queue_scope');
       if(typeof c.archived!=='boolean') fail('invalid_queue_scope');
+      // Display metadata only. It never widens which conversations are allowed.
+      if(c.updatedAt!==undefined&&(!Number.isSafeInteger(c.updatedAt)||c.updatedAt<0))fail('invalid_queue_scope');
       return Object.freeze({...c});
     });
     if(new Set(conversations.map(c=>c.id)).size!==conversations.length) fail('invalid_queue_scope');

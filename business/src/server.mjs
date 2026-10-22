@@ -48,8 +48,11 @@ export async function createBusinessServer(options = {}) {
   const username = options.username ?? 'admin';
   const salt = crypto.randomBytes(16); const passwordHash = crypto.scryptSync(password, salt, 64);
   const store = new JsonStore(options.stateFile ?? process.env.RMT_BUSINESS_STATE ?? path.resolve(here, '../../.runtime/business/server.json'),
-    { version: 1, devices: {}, jobs: [], projects: {}, conversations: {}, turns: {}, scopes: {} });
-  if (store.data.version !== 1 || !Array.isArray(store.data.jobs) || ['devices', 'projects', 'conversations', 'turns', 'scopes'].some(key => !store.data[key] || Array.isArray(store.data[key]) || typeof store.data[key] !== 'object')) { store.close(); fail('invalid_metadata'); }
+    { version: 1, devices: {}, jobs: [], projects: {}, conversations: {}, turns: {}, scopes: {}, sessions: {} });
+  // Login sessions survive a restart so a redeploy does not force a re-login.
+  // Only the token digest is stored, never the token itself.
+  if (typeof store.data.sessions !== 'object' || Array.isArray(store.data.sessions) || !store.data.sessions) store.data.sessions = {};
+  if (store.data.version !== 1 || !Array.isArray(store.data.jobs) || ['devices', 'projects', 'conversations', 'turns', 'scopes', 'sessions'].some(key => !store.data[key] || Array.isArray(store.data[key]) || typeof store.data[key] !== 'object')) { store.close(); fail('invalid_metadata'); }
   for(const grant of queueScopes.filter(g=>g.mode==='personal-projects')){
     store.data.projects[grant.deviceId]=queueProjects(grant).map(({id,name,available})=>({id,name,available}));
     for(const c of queueChats(grant))store.data.conversations[c.id]={id:c.id,projectId:c.projectId,deviceId:grant.deviceId};
@@ -64,7 +67,11 @@ export async function createBusinessServer(options = {}) {
     return [...projects.values()];
   }
   const board = new TaskBoard({ store, leaseMs: options.leaseMs, pruneQueueReads:Boolean(queueScope) });
-  const sessions = new Map(), pairs = new Map(), failures = new Map(), heartbeats = new Map();
+  // Restored sessions keep their original expiry. A restart must not extend
+  // the lifetime of a session that was already close to expiring.
+  const sessions = new Map(Object.entries(store.data.sessions)
+    .filter(([key, value]) => /^[0-9a-f]{64}$/.test(key) && value && Number.isSafeInteger(value.expires) && value.expires > Date.now())
+    .map(([key, value]) => [key, { expires: value.expires }])), pairs = new Map(), failures = new Map(), heartbeats = new Map();
   const waiting = new Set();
   const attachments = new Map();
   const directories = new Map(), snapshots = new Map(), eventLogs = new Map(), subscribers = new Set();
@@ -195,7 +202,8 @@ export async function createBusinessServer(options = {}) {
         const data = await body(req, 4096); object(data, ['username', 'password']);
         if (typeof data.password !== 'string' || !equal(String(data.username), username) || !crypto.timingSafeEqual(crypto.scryptSync(data.password, salt, 64), passwordHash)) fail('invalid_credentials', 401);
         if (sessions.size >= 1000) fail('session_capacity', 429);
-        failures.delete(address); const token = secret(); sessions.set(digest(token), { expires: Date.now() + 43_200_000 });
+        failures.delete(address); const token = secret(), key = digest(token), expires = Date.now() + 43_200_000;
+        sessions.set(key, { expires }); store.data.sessions[key] = { expires }; store.save();
         return json(res, 200, { ok: true }, { 'set-cookie': `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=43200${origin.startsWith('https:') ? '; Secure' : ''}` });
       }
       if (p === '/api/agent/pair' && method === 'POST') {
@@ -428,7 +436,9 @@ export async function createBusinessServer(options = {}) {
   server.on('connect', (_req, socket) => socket.destroy());
   const liveHeartbeat=setInterval(()=>{projection.prune();desktop.prune();for(const sub of catalogSubscribers){if(!authenticated(sub.req))sub.res.end();else if(sub.res.writableLength>1024*1024)sub.res.destroy();else sub.res.write(': heartbeat\n\n');}for(const s of desktopSubscribers){if(!conversationScope(s.conversationId)){s.res.end();continue;}const g=desktop.owner(s.conversationId);if(!authenticated(s.req)||store.data.devices[g.deviceId]?.revoked){s.res.end();continue;}s.res.write(': heartbeat\n\n');}for(const s of queueSubscribers){if(!authenticated(s.req)||!conversationScope(s.conversationId)){s.res.end();continue;}const health=projection.health(s.conversationId),deviceId=conversationScope(s.conversationId).deviceId,h=heartbeats.get(deviceId);s.send({...health,online:Boolean(h?.at>Date.now()-25000&&h.ready)});}},2000);liveHeartbeat.unref();
   const sweep = setInterval(() => {
-    for (const [key, value] of sessions) if (value.expires < Date.now()) sessions.delete(key);
+    let pruned = false;
+    for (const [key, value] of sessions) if (value.expires < Date.now()) { sessions.delete(key); if (Object.hasOwn(store.data.sessions, key)) { delete store.data.sessions[key]; pruned = true; } }
+    if (pruned) store.save();
     for (const [key, value] of pairs) if (value.expires < Date.now()) pairs.delete(key);
     for (const [key, value] of failures) if (value.until < Date.now()) failures.delete(key);
     try { board.sweep(); } catch { /* Board fails closed; no sensitive payload is logged. */ }

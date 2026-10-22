@@ -462,4 +462,85 @@ flex item 的 `min-width:auto` 会让它无法收缩到内容以下，长标题�
   补齐需要改发现管道并重启 Mac 端 agent，超出 UI 范围。
 - 服务重启会导致登录态失效，若频繁发布建议把会话落盘。
 
+---
+
+# 17. 追加：真实时间戳与登录态持久化
+
+用户批准后补齐两件事，并发现上一节的两个判断有误。
+
+## 17.1 更正：元数据库本来就有时间列
+
+第 16 节写"元数据库 `threads` 表无 `updated_at` 列"——**这是错的**。
+错因是测试 fixture 用的是最小表结构（`id,cwd,archived,rollout_path,title`），
+真实库不是。真实表有 `updated_at` / `updated_at_ms` / `recency_at_ms` / `created_at`，
+还有 `project_id` / `is_pinned` / `thread_section_id`。
+
+`prototype/desktop-companion/src/personal-discovery.mjs` 的 SQL 本来就用
+`columns.has(...)` 做可选列检测，加时间列正是该模式。
+
+## 17.2 真实时间戳上线
+
+| 环节 | 改动 |
+| --- | --- |
+| 发现层 | `discoverPersonal` 的 SQL 按 `columns.has('updated_at_ms')` 条件取列，chat 对象带 `updatedAt`（秒） |
+| 授权契约 | `queue-scope.mjs` 的 `project-readonly` 分支放行可选 `updatedAt`，校验为非负安全整数。**纯展示元数据，不改变任何授权语义** |
+| scope 产出 | `personalGrant` 把 `updatedAt` 放进 conversation |
+| 透传 | `server.mjs` 的 `mobileCatalog()` 与 `queue-app.js` 的 `allChats()` 原本就展开全部字段，自动带出 |
+| 前端 | `queue-app.js` 用服务端 `updatedAt` 排序与显示，端侧 recency 降级为兜底；项目「最近使用」分组改用项目内会话的真实活跃度 |
+
+**真实数据核对**（只读元数据库，未启动任何进程）：
+47 个项目、860 条会话、227 条归档，**859 条带 `updatedAt`**；
+最大项目 239 条，时间跨度 2026-08-26 20:33 → 2026-10-22 16:59；`binding` 未受影响。
+
+ECS 侧同步后：`mac-personal` 的 844 条会话**全部带 `updatedAt`**；
+唯一缺时间的是 `mac-rn-ui-queue` 这个更早的静态 scope（未重启，属预期）。
+
+荣耀真机：会话行显示 **3 小时前 / 6 小时前**（真实桌面活动时间），
+排序为新的在前。之前只有"手机打开过"的会话才有时间。
+
+## 17.3 登录态持久化
+
+`server.mjs` 的 `sessions` 原先只在内存，服务一重启手机就被踢回登录页。
+现在：
+
+- 登录成功时把 `digest(token)`（sha256，**不含明文 token**）与过期时间写进
+  已有的 `server.json`（0600、仅服务账户可读）。
+- 启动时从状态文件恢复，**不延长**已接近过期的会话寿命。
+- 过期会话在清扫时一并从状态文件删除。
+- 存量状态文件没有 `sessions` 键时补一个空对象，不影响升级。
+
+安全权衡：拿到 `server.json` 的人可以伪造会话。该文件本就含其他元数据，
+且服务是单管理员、自用、HTTPS-only，会话有效期仍为 12 小时。
+
+**验证**：
+- 新增回归测试 `business/test/session-persistence.test.mjs`（2 项）：
+  重启后会话仍有效、状态文件不含明文 token、已过期会话不被恢复。
+- 线上：登录 → 重启服务（PID 72465→72499）→ **同一 cookie 仍返回 200**，
+  伪造 cookie 仍 401。
+- 真机：服务重启后重新打开应用，**直接进入聊天页，未要求重新登录**。
+- 状态文件核对：5 个会话，key 全为 64 位 sha256，文件不含明文 token。
+
+## 17.4 发布记录
+
+| 项 | 值 |
+| --- | --- |
+| ECS release | `20261022T092641Z-ui-opt` |
+| 服务器测试 | **85/85 PASS**（83 + 2 项新增会话持久化测试） |
+| 服务 PID | 71827 → 72465 →（验证重启）72499 → 72522 |
+| personal-queue-agent | PID 7665 → 28423（`launchctl kickstart -k`），自动把新目录 publish 给 ECS，catalogRevision `5d7b71…` → `0cff5d…` |
+| 本地回归 | 业务 85/85、桌面伴随 98/98 |
+| 桌面 | 未重启；全局 MCP 未改动 |
+
+## 17.5 过程中发现的一个既有问题：登录限流
+
+真机上第一次登录失败，报的是"连接失败，请检查网络后重试"而不是"密码不正确"。
+根因：`server.mjs` 的登录限流是**按来源 IP 5 次/分钟，且成功登录也计数**。
+手机与 Mac 在同一 WiFi 共用公网 IP，我几次命令行登录把配额用光，
+手机拿到 429，而页面对 429 没有专门文案，落到了"连接失败"分支。
+
+这是既有行为，不是本轮引入，但值得记一笔：**同一出口 IP 下的多台设备会互相挤掉登录配额**，
+且前端把 429 误报为网络故障。修法（可另开一轮）：
+成功登录不计数、或按账号维度限流、或前端区分 `login_rate_limited` 文案。
+
+
 
