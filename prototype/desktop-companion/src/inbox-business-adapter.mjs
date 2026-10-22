@@ -10,7 +10,7 @@ import { privateDirectory } from './state.mjs';
 export class InboxBusinessAdapter {
   constructor({ runtime, threadId, enableLocalQueueTest = false, queueTestScope: grant, call = control }) {
     this.grant = queueTestScope(grant);
-    if (this.grant && (this.grant.conversationId !== threadId || this.grant.projectId !== 'rmtcdx-owner-inbox-test')) fail('queue_scope_rejected');
+    if (this.grant && (this.grant.mode !== 'dedicated-test' || this.grant.conversationId !== threadId || this.grant.projectId !== 'rmtcdx-owner-inbox-test')) fail('queue_scope_rejected');
     this.runtime = runtime; this.threadId = threadId; this.call = call; this.enabled = enableLocalQueueTest === true || Boolean(this.grant); this.available = false;
     this.projectId = 'rmtcdx-owner-inbox-test';
     this.operations = ['projects.sync','directory.sync','sessions.sync', ...(this.enabled ? ['queue.enqueue','queue.status','queue.cancel','queue.consumer.stop'] : [])];

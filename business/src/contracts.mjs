@@ -15,7 +15,9 @@ export const QUEUE_OPERATIONS = ['queue.enqueue', 'queue.status', 'queue.cancel'
 export const SUPPORTED_OPERATIONS = [...OPERATIONS, ...QUEUE_OPERATIONS];
 READS.add('queue.status');
 function queueReceipt(value, conversationId) {
-  object(value, ['intentId','threadId','state','revision','cancelRequested','consumerTurnId','sessionId','outcomeUncertain','resolution','result','text'], ['intentId','threadId','state','revision','cancelRequested','consumerTurnId','sessionId','outcomeUncertain']);
+  object(value, ['intentId','threadId','state','revision','cancelRequested','consumerTurnId','sessionId','outcomeUncertain','resolution','result','text','timing','progress'], ['intentId','threadId','state','revision','cancelRequested','consumerTurnId','sessionId','outcomeUncertain']);
+  if(value.timing!==undefined){object(value.timing,['enqueuedAt','leasedAt','completedAt','firstProgressAt'],['enqueuedAt']);for(const at of Object.values(value.timing))if(!Number.isSafeInteger(at)||at<0)fail('invalid_queue_timing');}
+  if(value.progress!==undefined){object(value.progress,['seq','text','at']);string(value.progress.text,16000);if(!Number.isSafeInteger(value.progress.seq)||value.progress.seq<1||!Number.isSafeInteger(value.progress.at)||value.progress.at<0)fail('invalid_queue_progress');}
   if(value.text!==undefined) string(value.text,16000);
   identifier(value.intentId); if (value.threadId !== conversationId) fail('queue_scope_mismatch');
   if (!['queued','leased','completed','cancelled','unknown'].includes(value.state) || !Number.isSafeInteger(value.revision) || value.revision < 1 || typeof value.cancelRequested !== 'boolean') fail('invalid_queue_receipt');

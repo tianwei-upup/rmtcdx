@@ -1,47 +1,134 @@
+import { QueueLive } from './queue-live.mjs';
 import { BusinessClient } from './business-client.mjs';
 import { QueueState } from './queue-state.mjs';
-const $=id=>document.getElementById(id),client=new BusinessClient({storage:localStorage}),state=new QueueState();
-document.documentElement.classList.toggle('android-shell',navigator.userAgent.includes(' CodexRemoteAndroid/'));
-let config,route,polling=false,busy=false,timer;
-const errorText={device_offline:'电脑暂时离线，稍后刷新核对。',network_unavailable:'网络暂时不可用，已有任务不会重复发送。',precondition_rejected:'任务状态已变化，请刷新核对。',execution_unknown:'交付结果尚未确认，请核对已有任务。',result_expired:'交付回执已过期，正在从电脑重新核对。',queue_scope_rejected:'当前只允许专用测试项目。',intent_conflict:'还有一条发送尚未确认，请先核对。'};
-function notice(text=''){$('notice').textContent=text;$('notice').hidden=!text;}
-function failure(error){console.warn('queue_request_failed',error.code??'request_failed');if(error.status===401){$('login').hidden=false;$('workspace').hidden=true;clearInterval(timer);$('loginNotice').textContent='登录已过期，请重新登录。';return;}notice(errorText[error.code]??'请求未完成，请稍后刷新核对。');}
-function controls(){const pending=route&&client.pending(route);$('enqueue').disabled=busy||!state.online||Boolean(pending);$('recovery').hidden=!pending;$('refresh').disabled=polling;}
+import { markdown, copyText } from './markdown.mjs';
+const $=id=>document.getElementById(id),client=new BusinessClient({storage:localStorage});
+let state=new QueueState(),config,rootConfig,catalog=[],projectId,selectionVersion=0,route,polling=false,busy=false,timer,selected,live,liveAvailable=false,liveConnected=false,follow=true,desktopHistory=null;
+const traces=new Map(),states=new Map(),drafts=new Map(),rows=new Map();
+const allChats=()=>catalog.flatMap(p=>p.conversations.map(c=>({...c,projectId:p.id,workspaceAvailable:p.available})));
+const chat=()=>allChats().find(c=>c.id===selected);
+const projectName=()=>catalog.find(p=>p.id===chat()?.projectId)?.name??config?.projectName??'专用测试项目';
+const desktopEnabled=()=>config?.desktopSync&&(!config.desktopConversations||config.desktopConversations.some(c=>c.id===selected));
+const errorText={device_offline:'电脑暂时离线，连接恢复后再发送。',network_unavailable:'网络暂时不可用，正在核对消息是否送达。',precondition_rejected:'消息状态已变化，正在重新同步。',execution_unknown:'发送状态还在确认，请先核对已有消息。',result_expired:'正在从电脑重新核对消息。',queue_scope_rejected:'当前会话尚未开放手机访问。',intent_conflict:'上一条消息还在确认，请先核对发送状态。'};
+function notice(text=''){$('noticeText').textContent=text;$('notice').hidden=!text;}
+function failure(error){console.warn('queue_request_failed',error.code??'request_failed');if(error.status===401||!config){$('login').hidden=false;$('workspace').hidden=true;live?.close();desktopHistory?.close();clearInterval(timer);$('loginNotice').textContent=error.status===401?'登录已过期，请重新登录。':'暂时无法连接，请检查网络后重试。';return;}notice(errorText[error.code]??'请求未完成，请重新连接后核对。');}
+function observed(){
+  if(document.hidden)return;const currentRoute=route,currentState=state;
+  requestAnimationFrame(()=>{if(route!==currentRoute||state!==currentState)return;for(const r of state.items.values()){
+    if(r.local)continue;const t=traces.get(r.intentId);if(!t)continue;const now=performance.now();
+    const phases=[['enqueueRendered',true,t.start],['claimRendered',Boolean(r.consumerTurnId),t.start],['firstOutputRendered',Boolean(r.progress)||r.state==='completed',t.start],['resultRendered',r.state==='completed',t.start],['cancelRendered',r.cancelRequested,t.cancelAt],['cancelAcknowledged',r.state==='cancelled',t.cancelAt]];
+    for(const [phase,condition,start]of phases)if(condition&&start!=null&&!t.seen.has(phase)){t.seen.add(phase);void client.api(currentRoute+'/observations',{observationId:crypto.randomUUID(),intentId:r.intentId,phase,durationMs:now-start,transport:t.transport??(liveConnected?'sse':'poll')}).catch(()=>{});}
+  }});
+}
+function confirmation(check){return liveAvailable?()=>live.confirm(check):undefined;}
+function reconcile(){const p=route&&client.pending(route);if(p&&state.items.has(p.id)&&!state.items.get(p.id).local)client.clear(route,'',p.id);}
+function stopTarget(){return state.list().find(r=>r.state==='leased'&&state.canCancel(r))??state.list().find(r=>state.canCancel(r));}
+function controls(){
+  const pending=route&&client.pending(route),archived=Boolean(chat()?.archived||desktopHistory?.capabilities?.archived),autoReceive=desktopHistory?.capabilities?.mobileReceive===true,hasText=Boolean($('text').value.trim()),target=stopTarget();
+  const unavailable=chat()?.workspaceAvailable===false||desktopHistory?.capabilities?.workspaceAvailable===false;
+  const loadingHistory=desktopEnabled()&&!desktopHistory?.available;
+  $('empty').querySelector('h1').textContent=!selected?'当前项目暂无会话':loadingHistory?'正在加载历史记录':'从这段对话继续';
+  $('emptyHint').textContent=!selected?'该项目还没有可查看的会话。':loadingHistory?'正在连接电脑并读取原会话，首次加载可能需要一些时间。':'发送消息，回答会同步显示在这里。';
+  $('enqueue').hidden=!hasText&&Boolean(target);$('stopReply').hidden=hasText||!target;
+  $('enqueue').disabled=busy||!state.online||Boolean(pending)||archived||unavailable||!selected||config?.queueWrites===false||!hasText;
+  $('stopReply').disabled=busy||!state.online||archived;$('text').disabled=archived||unavailable||!selected;$('text').placeholder=archived?'已归档的会话':unavailable?'项目目录不存在，仅查看历史':!selected?'当前项目暂无会话':'发送消息';
+  $('showChats').disabled=$('context').disabled=busy;$('recovery').hidden=!pending;
+  $('retryPending').hidden=!pending||!state.prompts.has(pending.id);$('retryPending').disabled=busy||!state.online;
+  $('reconcile').disabled=$('refresh').disabled=polling||busy;
+  const desktopMode=config?.executionMode==='desktop';
+  if($('composerHint'))$('composerHint').textContent=archived?'已归档 · 仅查看':desktopMode?'与电脑使用相同权限 · 回复与执行同步':'只读对话 · 回答与电脑同步';
+  $('accessPolicy').textContent=desktopMode?'与桌面权限一致：可改代码、执行命令，需要审批时由你决定。电脑需保持开机联网。':'当前只读：可以提问和分析上下文。电脑需保持开机联网。';
+  const c=state.consumer,active=c?.state==='active';$('consumerStatus').dataset.state=c?.state??'closed';
+  $('consumerStatus').textContent=!state.online?'电脑暂时离线，等待重新连接':active?'手机接收已开启':c?.state==='stopping'?'正在暂停手机接收':autoReceive?'发送后自动接入原会话':'消息会先排队，接收后开始处理';
+  $('stopConsumer').hidden=!active;$('stopConsumer').disabled=!state.online||busy;
+  $('connection').dataset.state=state.online&&liveConnected?'ready':'waiting';$('connection').textContent=!state.online?'连接中':liveConnected?'已同步':'同步中';
+  $('composerContext').textContent=archived?'已归档 · 仅查看':!state.online?'等待连接电脑':!active?'等待电脑接收':config.executionMode==='desktop'?'桌面权限':'只读对话';
+  if(desktopEnabled()){$('connection').dataset.state=desktopHistory?.available?'ready':'waiting';$('connection').textContent=desktopHistory?.available?(desktopHistory?.capabilities?.historySnapshot?'历史已同步':'已同步'):'连接中';$('composerContext').textContent=archived?'已归档 · 仅查看':desktopHistory?.pendingCount?'有审批等待处理，请查看最新消息':desktopHistory?.available?(config.queueWrites===false?'桌面实时同步 · 仅查看':active?(config.executionMode==='desktop'?'桌面权限 · 手机接收已开启':'桌面实时同步 · 手机接收已开启'):autoReceive?'历史已同步 · 可直接发送':'历史已同步 · 消息将排队'):autoReceive?'发送后接入原会话 · 历史同步中':'等待桌面同步';}
+  for(const row of rows.values()){row.cancel.disabled=busy||!state.online;row.retry.disabled=busy||!state.online||Boolean(pending);}
+}
+function createRow(id){
+  const article=document.createElement('article');article.className='task';article.dataset.intent=id;
+  const user=document.createElement('div');user.className='user-wrap';const bubble=document.createElement('div');bubble.className='message user';bubble.setAttribute('aria-label','你的消息');const prompt=document.createElement('p');prompt.className='prompt';bubble.append(prompt);
+  const delivery=document.createElement('div');delivery.className='delivery';const retry=document.createElement('button');retry.type='button';retry.className='text-button retry-message';retry.textContent='重新发送';user.append(bubble,delivery,retry);
+  const assistant=document.createElement('div');assistant.className='message assistant';assistant.setAttribute('aria-label','Codex 的回复');
+  const status=document.createElement('div');status.className='reply-status';const dot=document.createElement('span');dot.className='thinking-dot';dot.setAttribute('aria-hidden','true');const statusText=document.createElement('span');status.append(dot,statusText);
+  const result=document.createElement('div');result.className='message-content result';const actions=document.createElement('div');actions.className='message-actions';const copy=document.createElement('button');copy.type='button';copy.className='icon-button';copy.setAttribute('aria-label','复制回复');const icon=document.createElement('img');icon.src='/icons/copy.svg';icon.alt='';copy.append(icon);
+  const cancel=document.createElement('button');cancel.type='button';cancel.className='text-button cancel-message';actions.append(copy,cancel);assistant.append(status,result,actions);article.append(user,assistant);
+  const row={article,prompt,delivery,status,statusText,dot,result,copy,cancel,retry,body:null};
+  copy.onclick=()=>void copyText(row.body??'',copy);cancel.onclick=()=>void cancelMessage(row.receipt);retry.onclick=()=>void sendMessage(row.receipt.text,row.receipt.intentId);
+  rows.set(id,row);return row;
+}
 function render(){
-  const list=state.list().reverse();$('count').textContent=list.length+' 条';$('empty').hidden=list.length>0;
-  const cards=list.map(r=>{
-    const card=document.createElement('article');card.className='task';card.dataset.intent=r.intentId;card.dataset.state=r.state;card.dataset.uncertain=String(r.outcomeUncertain);
-    const head=document.createElement('div');head.className='task-head';const id=document.createElement('span');id.className='task-id';id.textContent=r.intentId.slice(0,12);const badge=document.createElement('span');badge.className='badge';badge.textContent=state.label(r);head.append(id,badge);card.append(head);
-    const prompt=document.createElement('p');prompt.className='prompt';prompt.textContent=r.text||state.prompts.get(r.intentId)||'已提交的任务';card.append(prompt);
-    if(r.state==='completed'){const result=document.createElement('div');result.className='result';result.textContent=r.result;card.append(result);const footer=document.createElement('div');footer.className='task-footer';const copy=document.createElement('button');copy.textContent='复制结果';copy.onclick=async()=>{try{await navigator.clipboard.writeText(r.result);copy.textContent='已复制';}catch{notice('请长按结果文字复制。');}};footer.append(copy);card.append(footer);}
-    if(state.canCancel(r)){const footer=document.createElement('div');footer.className='task-footer';const cancel=document.createElement('button');cancel.textContent=r.state==='queued'?'取消排队':'请求取消';cancel.disabled=!state.online;cancel.onclick=async()=>{cancel.disabled=true;try{const value=await client.job(route+'/cancel',{intentId:r.intentId,expectedRevision:r.revision},{writing:true,scope:r.intentId+':'+r.revision});state.merge([value.receipt]);render();}catch(e){failure(e);await refresh();}};footer.append(cancel);card.append(footer);}
-    if(r.outcomeUncertain||r.state==='unknown'||r.cancelRequested&&r.state==='leased'){const hint=document.createElement('p');hint.className='hint';hint.textContent=r.outcomeUncertain||r.state==='unknown'?'执行结果尚未确认，旧任务不会自动重试。需要在电脑端核对。':'等待桌面确认取消；任务可能已部分执行。';card.append(hint);}
-    return card;
-  });$('queue').replaceChildren(...cards);
-  const c=state.consumer,active=c&&c.state==='active';
-  $('consumerStatus').textContent=active?'桌面正在领取 · 本窗口已领取 '+c.takenJobs+'/'+c.maxJobs+' 条':c?.state==='stopping'?'桌面正在结束当前任务，后续消息保留排队。':'桌面未开启领取，消息将保留排队。请在电脑的专用测试会话开启领取窗口。';
-  $('stopConsumer').hidden=!active;$('stopConsumer').disabled=!state.online||busy;controls();
+  const list=state.list();$('empty').hidden=list.length>0||Boolean(desktopHistory?.itemCount);$('historyScope').hidden=!list.length||Boolean(desktopEnabled());$('queue').hidden=Boolean(desktopHistory?.itemCount);
+  list.forEach((r,index)=>{
+    const row=rows.get(r.intentId)??createRow(r.intentId);row.receipt=r;row.article.dataset.state=r.state;row.article.dataset.uncertain=String(Boolean(r.outcomeUncertain));
+    row.prompt.textContent=r.text||state.prompts.get(r.intentId)||'已发送的消息';row.delivery.dataset.state=r.state;
+    row.delivery.textContent=r.state==='sending'?'发送中…':r.state==='unconfirmed'?'正在确认是否送达':r.state==='failed'?'发送失败':'';row.retry.hidden=r.state!=='failed';
+    const uncertain=r.state==='unknown'||r.outcomeUncertain;
+    const status=uncertain?'需要在电脑确认结果，不会自动重发':r.cancelRequested&&r.state==='leased'?'正在停止回复…':r.state==='queued'?(state.consumer?.state==='active'?'等待电脑回复…':'等待电脑开启接收…'):r.state==='leased'?'正在回复…':r.state==='cancelled'?'已停止回复':'';
+    row.status.hidden=!status;row.statusText.textContent=status;row.dot.hidden=uncertain||!['queued','leased'].includes(r.state)||Boolean(r.cancelRequested);
+    const body=r.state==='completed'?(r.result??''):(r.progress?.text??'');if(body!==row.body){row.result.replaceChildren(markdown(body));row.body=body;}
+    row.result.classList.toggle('partial',r.state==='leased');row.result.setAttribute('aria-busy',String(r.state==='leased'));row.copy.hidden=!body;row.cancel.hidden=!state.canCancel(r);row.cancel.textContent=r.state==='queued'?'取消发送':'停止回复';
+    const position=$('queue').children[index];if(position!==row.article)$('queue').insertBefore(row.article,position??null);
+  });
+  for(const [id,row]of rows)if(!state.items.has(id)){row.article.remove();rows.delete(id);}
+  desktopHistory?.setQueue(list);
+  controls();observed();requestAnimationFrame(()=>{if(follow)$('chatScroll').scrollTop=$('chatScroll').scrollHeight;updateJump();});
 }
+function updateJump(){const scroll=$('chatScroll');$('jumpBottom').hidden=scroll.scrollHeight-scroll.clientHeight-scroll.scrollTop<100;}
+function resizeInput(){const input=$('text');input.style.height='auto';input.style.height=Math.min(input.scrollHeight,170)+'px';controls();}
+function renderChats(){
+  const query=$('search').value.trim().toLocaleLowerCase(),chats=catalog.find(p=>p.id===projectId)?.conversations??[];
+  if($('projectSelect')){$('projectSelect').replaceChildren(...catalog.map(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.name+'（'+p.conversations.length+'）';return o;}));$('projectSelect').value=projectId;}
+  const buttons=chats.filter(c=>c.title.toLocaleLowerCase().includes(query)).map(c=>{const b=document.createElement('button');b.type='button';b.className='session-row';b.dataset.chatId=c.id;b.setAttribute('aria-current',String(c.id===selected));b.disabled=busy;const title=document.createElement('span');title.className='session-title';title.textContent=c.title;b.append(title);if(c.archived){const tag=document.createElement('span');tag.className='session-archived';tag.textContent='已归档';b.append(tag);}b.onclick=()=>{if(!busy){selectChat(c.id);$('drawer').close();}};return b;});$('chatList').replaceChildren(...buttons);$('noChats').hidden=buttons.length>0;
+}
+function openDrawer(){renderChats();$('drawer').showModal();$('showChats').setAttribute('aria-expanded','true');}
 async function refresh(){
-  if(!config||polling||document.hidden)return;polling=true;controls();
-  try{const devices=await client.api('/api/devices'),device=devices.devices.find(d=>d.id===config.deviceId);state.online=Boolean(device?.online&&device?.ready);$('connection').textContent=state.online?'电脑在线':'电脑离线';
-    if(state.online){const value=await client.job(route+'/status',{});state.merge(value.receipts);state.consumer=value.consumer;
-      const pending=client.pending(route);if(pending&&state.items.has(pending.id)){const receipt=state.items.get(pending.id);if($('text').value.trim()===(receipt.text||state.prompts.get(pending.id)))$('text').value='';client.clear(route);notice('已核对：消息已入队，没有重复发送。');}
-    }render();
-  }catch(e){failure(e);}finally{polling=false;controls();}
+  if(!config||!route||polling||document.hidden)return;desktopHistory?.refresh();polling=true;const currentRoute=route,currentState=state;controls();
+  try{if(liveAvailable){await live.refresh();return;}const devices=await client.api('/api/devices'),device=devices.devices.find(d=>d.id===config.deviceId);if(route!==currentRoute||state!==currentState)return;state.online=Boolean(device?.online&&device?.ready);
+    if(state.online){const value=await client.job(currentRoute+'/status',{});if(route!==currentRoute||state!==currentState||liveAvailable)return;state.merge(value.receipts);state.consumer=value.consumer;reconcile();}render();
+  }catch(e){if(route===currentRoute){state.online=false;failure(e);}}finally{polling=false;controls();if(route!==currentRoute)void refresh();}
 }
-async function init(){config=await client.api('/api/queue/config');route='/api/conversations/'+config.conversationId+'/queue';$('login').hidden=true;$('workspace').hidden=false;$('loginNotice').textContent='';
-  const pathDevice=/^\/devices\/([^/]+)\/$/.exec(location.pathname)?.[1];if(pathDevice&&pathDevice!==config.deviceId)throw Object.assign(Error('scope'),{code:'queue_scope_rejected'});
-  await refresh();clearInterval(timer);timer=setInterval(()=>void refresh(),3000);
+async function selectChat(id){
+ const version=++selectionVersion,c=allChats().find(c=>c.id===id);live?.close();desktopHistory?.close();route=null;state.online=false;controls();
+ try{const next=c&&c.deviceId!==config.deviceId?await client.api('/api/queue/config?realtime=1&deviceId='+encodeURIComponent(c.deviceId)):config;
+ if(version!==selectionVersion)return;config=next;activateChat(id);}
+ catch(e){if(version===selectionVersion)failure(e);}
 }
-$('login').onsubmit=async event=>{event.preventDefault();const button=$('login').querySelector('button');button.disabled=true;try{await client.api('/api/login',{username:'admin',password:$('password').value});$('password').value='';await init();}catch(e){$('loginNotice').textContent=e.code==='invalid_credentials'?'密码不正确，请重试。':'连接失败，请检查网络后重试。';}finally{button.disabled=false;}};
-$('composer').onsubmit=async event=>{event.preventDefault();const text=$('text').value.trim();if(!text||busy||client.pending(route))return;busy=true;controls();
-  try{const value=await client.job(route,{text},{writing:true,onAccepted:()=>{const p=client.pending(route);if(p)state.prompts.set(p.id,text);}});state.prompts.set(value.receipt.intentId,text);state.merge([value.receipt]);$('text').value='';notice('消息已入队，等待桌面领取。');render();await refresh();}
-  catch(e){failure(e);await refresh();}finally{busy=false;controls();}
-};
-$('refresh').onclick=$('reconcile').onclick=()=>void refresh();
-$('stopConsumer').onclick=async()=>{if(!state.consumer)return;busy=true;controls();try{const value=await client.job(route+'/stop',{sessionId:state.consumer.sessionId},{writing:true,scope:state.consumer.sessionId});state.consumer=value.consumer;render();}catch(e){failure(e);}finally{busy=false;controls();}};
-document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refresh();});
-window.addEventListener('online',()=>void refresh());
-$('loginButton').disabled=false;
-void init().catch(error=>{if(error.status!==401)failure(error);});
+function activateChat(id){
+  if(route)drafts.set(selected,$('text').value);projectId=allChats().find(c=>c.id===id)?.projectId??projectId;$('projectName').textContent=$('drawerProject').textContent=catalog.find(p=>p.id===projectId)?.name??'所有项目';desktopHistory?.close();desktopHistory=null;live?.close();liveAvailable=false;liveConnected=false;selected=id;route=id?'/api/conversations/'+id+'/queue':null;state=states.get(id)??new QueueState();states.set(id,state);state.online=false;
+  rows.clear();$('queue').replaceChildren();follow=true;$('text').value=drafts.get(id)??'';notice();$('pageTitle').textContent=chat()?.title??(id?'专用测试会话':'暂无会话');$('context').setAttribute('aria-label','当前会话：'+$('pageTitle').textContent+'，项目：'+projectName()+'，切换会话');$('composerLabel').textContent='发送到：'+$('pageTitle').textContent;resizeInput();
+  try{if(id)localStorage.setItem('rmt-queue-selected:'+rootConfig.deviceId,id);}catch{}render();if(!id)return;const targetState=state,targetRoute=route;
+  if(config.realtime)live=new QueueLive({route,api:(...args)=>client.api(...args),onUpdate:value=>{if(route!==targetRoute||state!==targetState)return;liveAvailable=true;state.online=value.fresh!==false;state.merge(value.receipts);for(const r of value.receipts){const t=traces.get(r.intentId);if(t)t.transport=value.transport;}state.consumer=value.consumer;reconcile();render();},onHealth:value=>{if(route!==targetRoute)return;if(value.available!==undefined)liveAvailable=Boolean(value.available);if(value.connected!==undefined)liveConnected=value.connected;if(value.fresh!==undefined)state.online=Boolean(value.available&&value.fresh);controls();},onError:error=>{if(route!==targetRoute)return;if(error.status===401)failure(error);else if(!['projection_unavailable','network_unavailable'].includes(error.code))failure(error);}}).start();void refresh();
+  if(desktopEnabled())void import('./desktop-history.mjs').then(({mountDesktopHistory})=>{if(route!==targetRoute)return;let host=$('desktopHistory');if(!host){host=document.createElement('div');host.id='desktopHistory';$('historyScope').before(host);}desktopHistory=mountDesktopHistory({host,route:'/api/conversations/'+id+'/desktop',api:(...args)=>client.api(...args),queueRow:r=>(rows.get(r.intentId)??createRow(r.intentId)).article,onUpdate:()=>{controls();$('queue').hidden=Boolean(desktopHistory?.itemCount);$('empty').hidden=Boolean(desktopHistory?.itemCount)||state.items.size>0;requestAnimationFrame(()=>{if(follow)$('chatScroll').scrollTop=$('chatScroll').scrollHeight;updateJump();});},onError:error=>{if(route!==targetRoute)return;if(error.status===401)failure(error);else console.warn('desktop_history_unavailable',error.code??'history_loading');}});desktopHistory.setQueue(state.list());});
+}
+async function init(){
+  const requested=/^\/devices\/([^/]+)\/$/.exec(location.pathname)?.[1];config=await client.api('/api/queue/config?realtime=1'+(requested?'&deviceId='+encodeURIComponent(requested):''));if(requested&&requested!==config.deviceId)throw Object.assign(Error('scope'),{code:'queue_scope_rejected'});
+  rootConfig=config;catalog=(config.mode==='dedicated-test'?null:config.projectCatalog)??[{id:config.projectId,name:config.projectName??'专用测试项目',available:true,conversations:(config.conversations??[{id:config.conversationId,title:'专用测试会话',archived:false}]).map(c=>({...c,deviceId:config.deviceId}))}];
+  $('login').hidden=true;$('workspace').hidden=false;$('loginNotice').textContent='';let saved;try{saved=localStorage.getItem('rmt-queue-selected:'+rootConfig.deviceId)??localStorage.getItem('rmt-queue-selected:mac-rn-ui-queue');}catch{}
+  const chats=allChats(),id=chats.some(c=>c.id===saved)?saved:chats.find(c=>!c.archived&&c.workspaceAvailable)?.id??chats[0]?.id;projectId=chats.find(c=>c.id===id)?.projectId??catalog[0]?.id;await selectChat(id);clearInterval(timer);timer=setInterval(()=>{if(!liveAvailable)void refresh();},3000);
+}
+async function sendMessage(text=$('text').value.trim(),retryId){
+  if(!text||busy||!state.online||chat()?.archived||desktopHistory?.capabilities?.archived||config?.queueWrites===false||chat()?.workspaceAvailable===false||desktopHistory?.capabilities?.workspaceAvailable===false)return;const pending=client.pending(route);if(pending&&pending.id!==retryId)return;busy=true;controls();let sendingId;
+  try{const value=await client.job(route,{text},{writing:true,onIntent:id=>{sendingId=id;if(retryId&&retryId!==id)state.removeLocal(retryId);state.sending(id,text);if(!traces.has(id))traces.set(id,{start:performance.now(),seen:new Set()});if($('text').value.trim()===text){$('text').value='';drafts.set(selected,'');resizeInput();}follow=true;notice();render();},confirmation:confirmation(()=>{const r=state.items.get(sendingId);return r&&!r.local&&r.text===text?{receipt:r}:null;})});state.prompts.set(value.receipt.intentId,text);state.merge([value.receipt]);render();}
+  catch(e){state.deliveryFailed(sendingId,Boolean(e.uncertain));failure(e);render();void refresh();}finally{busy=false;controls();}
+}
+async function cancelMessage(r){
+  if(!r||busy||!state.online||!state.canCancel(r))return;busy=true;controls();try{const trace=traces.get(r.intentId)??{seen:new Set()};trace.cancelAt=performance.now();traces.set(r.intentId,trace);
+    const value=await client.job(route+'/cancel',{intentId:r.intentId,expectedRevision:r.revision},{writing:true,scope:r.intentId+':'+r.revision,confirmation:confirmation(()=>{const current=state.items.get(r.intentId);return current&&(current.state==='cancelled'||current.cancelRequested)?{receipt:current}:null;})});state.merge([value.receipt]);render();
+  }catch(e){failure(e);void refresh();}finally{busy=false;controls();}
+}
+function boot(){
+  $('workspace').classList.toggle('native-shell',navigator.userAgent.includes(' CodexRemoteAndroid/'));
+  $('showChats').onclick=$('context').onclick=openDrawer;$('closeDrawer').onclick=()=>$('drawer').close();$('drawer').onclose=()=>$('showChats').setAttribute('aria-expanded','false');$('drawer').onclick=event=>{if(event.target===$('drawer')&&event.clientX>=$('drawer').getBoundingClientRect().right)$('drawer').close();};$('search').oninput=renderChats;if($('projectSelect'))$('projectSelect').onchange=()=>{projectId=$('projectSelect').value;$('search').value='';renderChats();const c=catalog.find(p=>p.id===projectId)?.conversations[0];void selectChat(c?.id);};
+  $('dismissNotice').onclick=()=>notice();$('text').oninput=()=>{drafts.set(selected,$('text').value);resizeInput();};$('text').onkeydown=event=>{if(event.key==='Enter'&&!event.isComposing&&!event.shiftKey&&(event.ctrlKey||event.metaKey||!matchMedia('(pointer: coarse)').matches)){event.preventDefault();void sendMessage();}};
+  $('composer').onsubmit=event=>{event.preventDefault();void sendMessage();};$('stopReply').onclick=()=>void cancelMessage(stopTarget());$('retryPending').onclick=()=>{const p=client.pending(route);if(p)void sendMessage(state.prompts.get(p.id),p.id);};$('refresh').onclick=$('reconcile').onclick=()=>void refresh();
+  $('stopConsumer').onclick=async()=>{if(!state.consumer||busy)return;busy=true;controls();try{const value=await client.job(route+'/stop',{sessionId:state.consumer.sessionId},{writing:true,scope:state.consumer.sessionId,confirmation:confirmation(()=>state.consumer?.state!=='active'?{consumer:state.consumer}:null)});state.consumer=value.consumer;render();}catch(e){failure(e);}finally{busy=false;controls();}};
+  $('login').onsubmit=async event=>{event.preventDefault();$('loginButton').disabled=true;try{await client.api('/api/login',{username:'admin',password:$('password').value});$('password').value='';await init();}catch(e){$('loginNotice').textContent=e.code==='invalid_credentials'?'密码不正确，请重试。':'连接失败，请检查网络后重试。';}finally{$('loginButton').disabled=false;}};
+  $('chatScroll').onscroll=()=>{const el=$('chatScroll');follow=el.scrollHeight-el.clientHeight-el.scrollTop<100;updateJump();};$('jumpBottom').onclick=()=>{follow=true;$('chatScroll').scrollTop=$('chatScroll').scrollHeight;updateJump();};
+  const viewport=()=>{document.documentElement.style.setProperty('--app-height',(window.visualViewport?.height??window.innerHeight)+'px');requestAnimationFrame(()=>{if(follow)$('chatScroll').scrollTop=$('chatScroll').scrollHeight;});};window.visualViewport?.addEventListener('resize',viewport);window.addEventListener('resize',viewport);viewport();
+  new ResizeObserver(()=>{$('workspace').style.setProperty('--composer-offset',($('composerFooter').offsetHeight+14)+'px');}).observe($('composerFooter'));
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refresh();});window.addEventListener('online',()=>void refresh());window.addEventListener('offline',()=>{state.online=false;controls();});$('loginButton').disabled=false;void init().catch(failure);
+}
+// A hot asset update can briefly pair new JavaScript with an old cached page.
+if(!$('chatScroll'))location.reload();else boot();

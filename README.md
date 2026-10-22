@@ -100,3 +100,5 @@ Mac 按 [操作清单](docs/MAC_SETUP.md) 先验证本机，再使用 `mac` 配�
 旧 Cloudflare 安装脚本保留供原有环境参考，不参与当前中转链路；当前 APK 默认不会打包旧隧道地址。
 
 项目加载与 App 本地置顶：见 [验证说明](docs/PROJECT_CATALOG_VALIDATION.md)。
+
+2026-10-22：已接入当前 Mac 全部 47 个本机项目的 848 条既有会话。APK 会话列表可切换项目；归档只读，未归档沿用桌面权限。部署和真机验收见 [全部项目历史接入](docs/PERSONAL_PROJECT_HISTORY_ACCESS.md)。

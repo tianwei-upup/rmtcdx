@@ -9,22 +9,26 @@ export class InboxConsumer {
     if (!row || turnId != null && row.turn_id !== turnId) throw failure('inbox_consumer_mismatch');
     return row;
   }
-  expire() { this.inbox.transaction(() => {
+  expireRows() {
     for (const row of this.db.prepare("SELECT * FROM consumers WHERE state='active' AND expires_at<=?").all(Date.now())) {
       this.db.prepare("UPDATE consumers SET state='stopping',reason='deadline',waiting=0 WHERE id=?").run(row.id); this.inbox.finishSession(row.id);
     }
-  }); }
+  }
+  expire() { this.inbox.transaction(() => this.expireRows()); }
   status() { this.expire(); return this.view(this.db.prepare('SELECT * FROM consumers ORDER BY rowid DESC LIMIT 1').get()); }
   open(turnId, windowMs = 120000, maxJobs = 10) {
-    if (!turnId || !Number.isInteger(windowMs) || windowMs < 1000 || windowMs > 600000 || !Number.isInteger(maxJobs) || maxJobs < 1 || maxJobs > 100) throw failure('invalid_consumer_window');
     this.expire();
-    return this.inbox.transaction(() => {
+    return this.inbox.transaction(() => this.openRow(turnId, windowMs, maxJobs));
+  }
+  // Caller holds the Inbox write transaction. Standby uses this with its policy
+  // check and bind so a concurrent Interrupt cannot pause between those steps.
+  openRow(turnId, windowMs, maxJobs) {
+    if (!turnId || !Number.isInteger(windowMs) || windowMs < 1000 || windowMs > 600000 || !Number.isInteger(maxJobs) || maxJobs < 1 || maxJobs > 100) throw failure('invalid_consumer_window');
       if (this.db.prepare("SELECT 1 FROM consumers WHERE state IN ('active','stopping')").get()) throw failure('inbox_consumer_already_active');
       if (this.db.prepare("SELECT 1 FROM jobs WHERE state IN ('leased','unknown')").get()) throw failure('inbox_outcome_unknown');
       const id = crypto.randomUUID();
       this.db.prepare("INSERT INTO consumers(id,turn_id,state,expires_at,max_jobs) VALUES (?,?,'active',?,?)").run(id, turnId, Date.now() + windowMs, maxJobs);
       this.inbox.event('consumer.opened', {session_id: id}); return this.view(this.get(id));
-    });
   }
   stop(sessionId, reason = 'requested', turnId) {
     return this.inbox.transaction(() => {

@@ -1,3 +1,6 @@
+import { QueueProjection } from './queue-projection.mjs';
+import { DesktopRelay } from './desktop-relay.mjs';
+import { historyJson } from './history-json.mjs';
 import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
@@ -6,7 +9,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { TaskBoard } from './tasks.mjs';
 import { JsonStore } from './storage.mjs';
-import { queueTestScope, SCOPED_QUEUE_OPERATIONS } from './queue-scope.mjs';
+import { queueScopeList, queueConversationAllowed, queueChats, queueProjects, queueProjectAllowed, queueConversationProject, SCOPED_QUEUE_OPERATIONS } from './queue-scope.mjs';
 import { object, identifier, string, fingerprint, fail, id, OPERATIONS, SUPPORTED_OPERATIONS, QUEUE_OPERATIONS, businessEvent, output, validateImage } from './contracts.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -20,8 +23,9 @@ function originUrl(value) {
   return url.origin;
 }
 function json(res, status, value, headers = {}) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...headers });
-  res.end(JSON.stringify(value));
+  const encoded=historyJson(res.req,value);
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...encoded.headers, ...headers });
+  res.end(encoded.bytes);
 }
 async function body(req, limit = 4 * 1024 * 1024) {
   const chunks = []; let size = 0;
@@ -32,7 +36,9 @@ async function body(req, limit = 4 * 1024 * 1024) {
 export async function createBusinessServer(options = {}) {
   const origin = originUrl(options.origin ?? process.env.RMT_BUSINESS_ORIGIN ?? 'http://127.0.0.1:3230');
   const queueTest = options.enableLocalQueueTest === true;
-  const queueScope = queueTestScope(options.queueTestScope);
+  const queueScopes=queueScopeList(options.queueTestScope), queueScope=queueScopes[0]??null;
+  const deviceScope=id=>queueScopes.find(g=>g.deviceId===id);
+  const conversationScope=id=>queueScopes.find(g=>queueConversationAllowed(g,id));
   if (queueScope && (!origin.startsWith('https:') || queueTest)) fail('dedicated_queue_https_required');
   if (queueTest && !['127.0.0.1','localhost'].includes(new URL(origin).hostname)) fail('queue_protocol_loopback_only');
   const acceptedOperations = queueScope ? SCOPED_QUEUE_OPERATIONS : queueTest ? SUPPORTED_OPERATIONS : OPERATIONS;
@@ -43,11 +49,26 @@ export async function createBusinessServer(options = {}) {
   const store = new JsonStore(options.stateFile ?? process.env.RMT_BUSINESS_STATE ?? path.resolve(here, '../../.runtime/business/server.json'),
     { version: 1, devices: {}, jobs: [], projects: {}, conversations: {}, turns: {}, scopes: {} });
   if (store.data.version !== 1 || !Array.isArray(store.data.jobs) || ['devices', 'projects', 'conversations', 'turns', 'scopes'].some(key => !store.data[key] || Array.isArray(store.data[key]) || typeof store.data[key] !== 'object')) { store.close(); fail('invalid_metadata'); }
+  for(const grant of queueScopes.filter(g=>g.mode==='personal-projects')){
+    store.data.projects[grant.deviceId]=queueProjects(grant).map(({id,name,available})=>({id,name,available}));
+    for(const c of queueChats(grant))store.data.conversations[c.id]={id:c.id,projectId:c.projectId,deviceId:grant.deviceId};
+  }
+  if(queueScopes.some(g=>g.mode==='personal-projects'))store.save();
+  function mobileCatalog(){
+    const projects=new Map();
+    for(const g of queueScopes.filter(g=>g.mode!=='dedicated-test'))for(const p of queueProjects(g)){
+      const entry=projects.get(p.id)??{id:p.id,name:p.name,available:p.available,conversations:[]};
+      entry.conversations.push(...p.conversations.map(c=>({...c,deviceId:g.deviceId})));projects.set(p.id,entry);
+    }
+    return [...projects.values()];
+  }
   const board = new TaskBoard({ store, leaseMs: options.leaseMs, pruneQueueReads:Boolean(queueScope) });
   const sessions = new Map(), pairs = new Map(), failures = new Map(), heartbeats = new Map();
   const waiting = new Set();
   const attachments = new Map();
   const directories = new Map(), snapshots = new Map(), eventLogs = new Map(), subscribers = new Set();
+  const projection=new QueueProjection({grants:queueScopes}),queueSubscribers=new Set();
+  const desktop=new DesktopRelay({scopes:options.desktopScopes,queueScopes}),desktopSubscribers=new Set();
   const cookieName = origin.startsWith('https:') ? '__Host-rmt-business' : 'rmt-business';
   let closing = false;
   const authenticated = req => {
@@ -58,16 +79,17 @@ export async function createBusinessServer(options = {}) {
   function device(req) {
     if (req.headers.origin) fail('agent_origin_rejected', 403);
     const deviceId = identifier(req.headers['x-device-id']);
-    if (queueScope && deviceId !== queueScope.deviceId) fail('device_unauthorized', 401);
+    if (queueScope && !deviceScope(deviceId)) fail('device_unauthorized', 401);
     const value = Object.hasOwn(store.data.devices, deviceId) ? store.data.devices[deviceId] : null;
     const token = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
     if (!value || value.revoked || !token || !equal(digest(token), value.tokenHash)) fail('device_unauthorized', 401);
     return deviceId;
   }
-  function hasDevice(deviceId) { if (queueScope && deviceId !== queueScope.deviceId || !id(deviceId) || !Object.hasOwn(store.data.devices, deviceId) || store.data.devices[deviceId].revoked) fail('device_not_found', 404); }
+  function hasDevice(deviceId) { if (queueScope && !deviceScope(deviceId) || !id(deviceId) || !Object.hasOwn(store.data.devices, deviceId) || store.data.devices[deviceId].revoked) fail('device_not_found', 404); }
   function submit(deviceId, operation, value, intentId) {
     hasDevice(deviceId);
-    if (queueScope && (!acceptedOperations.includes(operation) || value.projectId && value.projectId !== queueScope.projectId || value.conversationId && value.conversationId !== queueScope.conversationId)) fail('queue_scope_rejected', 403);
+    const queueScope=deviceScope(deviceId);
+    if (queueScope && (!acceptedOperations.includes(operation) || value.projectId && !queueProjectAllowed(queueScope,value.projectId) || value.conversationId && !queueConversationAllowed(queueScope,value.conversationId))) fail('queue_scope_rejected', 403);
     // An accepted intent remains queryable even while its executor is offline.
     if ([...board.jobs.values()].some(job => job.intentId === intentId)) return board.submit(deviceId, operation, value, intentId);
     const heartbeat = heartbeats.get(deviceId);
@@ -77,12 +99,13 @@ export async function createBusinessServer(options = {}) {
     return job;
   }
   function ownedConversation(conversationId, deviceId) {
-    if (queueScope && conversationId !== queueScope.conversationId) fail('conversation_not_found', 404);
+    const grant=conversationScope(conversationId);
+    if (queueScope && !grant) fail('conversation_not_found', 404);
     const value = Object.hasOwn(store.data.conversations, conversationId) ? store.data.conversations[conversationId] : null;
-    if (!value || deviceId && value.deviceId !== deviceId || queueScope && value.projectId !== queueScope.projectId) fail('conversation_not_found', 404);
+    if (!value || deviceId && value.deviceId !== deviceId || queueScope && (value.projectId !== queueConversationProject(grant,conversationId) || value.deviceId !== grant.deviceId)) fail('conversation_not_found', 404);
     hasDevice(value.deviceId); return value;
   }
-  function project(deviceId, projectId) { hasDevice(deviceId); if (queueScope && projectId !== queueScope.projectId || !(store.data.projects[deviceId] ?? []).some(p => p.id === projectId)) fail('project_not_registered', 404); }
+  function project(deviceId, projectId) { hasDevice(deviceId); const queueScope=deviceScope(deviceId); if (queueScope && !queueProjectAllowed(queueScope,projectId) || !(store.data.projects[deviceId] ?? []).some(p => p.id === projectId)) fail('project_not_registered', 404); }
   function publish(deviceId, value) {
     const log = eventLogs.get(deviceId) ?? { epoch: crypto.randomUUID(), next: 0, events: [] };
     log.expires = Date.now() + 300000;
@@ -97,14 +120,19 @@ export async function createBusinessServer(options = {}) {
     return entry;
   }
   function validateResult(job, value) {
+    const queueScope=deviceScope(job.deviceId);
     const result = output(job.operation, value), scope = store.data.scopes[job.id] ?? {};
     const candidates = result.directories?.flatMap(d => d.conversations) ?? result.conversations ?? (result.conversation ? [result.conversation] : []);
-    if (queueScope && (result.projects?.some(p => p.id !== queueScope.projectId) || candidates.some(c => c.id !== queueScope.conversationId || c.projectId !== queueScope.projectId))) fail('result_scope_mismatch', 409);
+    if (queueScope && (result.projects?.some(p => !queueProjectAllowed(queueScope,p.id)) || candidates.some(c => !queueConversationAllowed(queueScope,c.id) || c.projectId !== queueConversationProject(queueScope,c.id)))) fail('result_scope_mismatch', 409);
     for (const conversation of candidates) {
       if (job.operation === 'directory.sync') { if (!result.projects.some(p => p.id === conversation.projectId)) fail('result_scope_mismatch', 409); }
       else project(job.deviceId, conversation.projectId);
       if (scope.projectId && conversation.projectId !== scope.projectId || scope.conversationId && conversation.id !== scope.conversationId) fail('result_scope_mismatch', 409);
-      if (Object.hasOwn(store.data.conversations, conversation.id) && (store.data.conversations[conversation.id].deviceId !== job.deviceId || job.operation !== 'directory.sync' && store.data.conversations[conversation.id].projectId !== conversation.projectId)) fail('conversation_collision', 409);
+      const previous=store.data.conversations[conversation.id];
+      // Explicit named-project rollout may rebind historical metadata from the
+      // retired executor. Only exact granted IDs in the SAME project qualify.
+      const grantedMigration=queueScope && job.deviceId===queueScope.deviceId && previous?.projectId===queueConversationProject(queueScope,conversation.id) && conversation.projectId===queueConversationProject(queueScope,conversation.id) && queueConversationAllowed(queueScope,conversation.id);
+      if (previous && (previous.deviceId !== job.deviceId && !grantedMigration || job.operation !== 'directory.sync' && previous.projectId !== conversation.projectId)) fail('conversation_collision', 409);
     }
     if (['turn.start', 'turn.cancel', 'approval.resolve', 'attachment.stage'].includes(job.operation) && result.conversationId !== scope.conversationId) fail('result_scope_mismatch', 409);
     if (QUEUE_OPERATIONS.includes(job.operation)) {
@@ -140,9 +168,9 @@ export async function createBusinessServer(options = {}) {
     res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     try {
       const url = new URL(req.url, origin), p = url.pathname, method = req.method;
-      if(queueScope && method==='GET' && p==='/devices/mac/'){res.writeHead(302,{'location':`/devices/${queueScope.deviceId}/`,'content-type':'text/plain'});return res.end('Dedicated test queue');}
-      if (method === 'GET' && (['/', '/app.js', '/style.css', '/chat-state.mjs', '/markdown.mjs', '/business-client.mjs', '/queue-app.js', '/queue-state.mjs', '/queue.css'].includes(p) || /^\/devices\/[A-Za-z0-9_-]+\/$/.test(p))) {
-        if (queueScope && p.startsWith('/devices/') && p !== `/devices/${queueScope.deviceId}/`) fail('device_not_found', 404);
+      if(queueScope && method==='GET' && (p==='/devices/mac/' || queueScope.mode==='project-readonly' && p==='/devices/mac-owner-inbox-test/' && !deviceScope('mac-owner-inbox-test'))){res.writeHead(302,{'location':`/devices/${queueScopes.find(g=>g.mode==='personal-projects')?.deviceId??queueScope.deviceId}/`,'content-type':'text/plain'});return res.end('Dedicated test queue');}
+      if (method === 'GET' && (['/', '/app.js', '/style.css', '/chat-state.mjs', '/markdown.mjs', '/business-client.mjs', '/queue-app.js', '/queue-state.mjs', '/queue-live.mjs', '/desktop-live.mjs', '/desktop-history.mjs', '/desktop-merge.mjs', '/queue.css'].includes(p) || /^\/devices\/[A-Za-z0-9_-]+\/$/.test(p))) {
+        if (queueScope && p.startsWith('/devices/') && !deviceScope(p.split('/')[2])) fail('device_not_found', 404);
         const filename = p === '/' || p.startsWith('/devices/') ? queueScope ? 'queue.html' : 'index.html' : p.slice(1);
         const content = fs.readFileSync(path.resolve(here, '../dist', filename));
         res.writeHead(200, { 'content-type': /\.(mjs|js)$/.test(filename) ? 'text/javascript; charset=utf-8' : filename.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/html; charset=utf-8' });
@@ -167,7 +195,7 @@ export async function createBusinessServer(options = {}) {
       if (p === '/api/agent/pair' && method === 'POST') {
         if (req.headers.origin) fail('agent_origin_rejected', 403);
         const data = await body(req, 4096); object(data, ['deviceId', 'code']); identifier(data.deviceId); string(data.code, 100);
-        if (queueScope && data.deviceId !== queueScope.deviceId) fail('pairing_invalid', 401);
+        if (queueScope && !deviceScope(data.deviceId)) fail('pairing_invalid', 401);
         const pair = pairs.get(digest(data.code));
         if (!pair || pair.expires < Date.now() || pair.id !== data.deviceId) fail('pairing_invalid', 401);
         pairs.delete(digest(data.code)); const token = secret();
@@ -177,6 +205,21 @@ export async function createBusinessServer(options = {}) {
       }
       if (p.startsWith('/api/agent/')) {
         const deviceId = device(req);
+        if(p.startsWith('/api/agent/desktop/')&&method==='POST'){
+          const data=await body(req,32*1024*1024),action=p.slice('/api/agent/desktop/'.length);
+          if(action==='hello'){object(data,['epoch','conversationIds']);return json(res,200,desktop.hello(deviceId,data));}
+          if(action==='ping'){object(data,['epoch']);return json(res,200,desktop.ping(deviceId,data.epoch));}
+          if(action==='projection'){object(data,['publisherEpoch','view']);ownedConversation(data.view?.conversationId,deviceId);return json(res,200,desktop.update(deviceId,data));}
+          if(action==='claim'){
+            object(data,['epoch']);desktop.publisher(deviceId,data.epoch);waiting.add(res);
+            try{const until=Date.now()+(options.claimWaitMs??20000);do{const intent=desktop.claim(deviceId,data.epoch);if(intent)return json(res,200,{intent});if(res.destroyed||closing)return;await new Promise(r=>setTimeout(r,50));}while(Date.now()<until);return json(res,200,{intent:null});}finally{waiting.delete(res);}
+          }
+          if(action==='result'){object(data,['epoch','intentId','state','code'],['epoch','intentId','state']);return json(res,200,desktop.result(deviceId,data));}
+          fail('endpoint_not_found',404);
+        }
+        if(p==='/api/agent/queue/hello'&&method==='POST'){const data=await body(req,65536);object(data,['epoch','conversationIds'],['epoch']);return json(res,200,projection.hello(deviceId,data.epoch,data.conversationIds));}
+        if(p==='/api/agent/queue/ping'&&method==='POST'){const data=await body(req,65536);object(data,['epoch','conversationIds'],['epoch']);return json(res,200,projection.ping(deviceId,data.epoch,data.conversationIds));}
+        if(p==='/api/agent/queue/projection'&&method==='POST'){const data=await body(req);ownedConversation(data.conversationId,deviceId);return json(res,200,projection.update(deviceId,data));}
         if (p === '/api/agent/heartbeat' && method === 'POST') {
           const data = await body(req, 16384); object(data, ['active', 'ready']);
           if (!Array.isArray(data.active) || data.active.length > 10 || typeof data.ready !== 'boolean') fail('invalid_heartbeat');
@@ -231,11 +274,11 @@ export async function createBusinessServer(options = {}) {
       if (p.startsWith('/api/')) {
         if (!authenticated(req)) fail('login_required', 401);
         if (!['GET', 'HEAD'].includes(method) && req.headers.origin !== origin) fail('origin_rejected', 403);
-        if (p === '/api/queue/config' && method === 'GET') { if (!queueScope) fail('queue_protocol_disabled',403); return json(res,200,{ ...queueScope, protocolVersion:2 }); }
-        if (p === '/api/devices' && method === 'GET') return json(res, 200, { devices: Object.values(store.data.devices).filter(d => !d.revoked && (!queueScope || d.id === queueScope.deviceId)).map(d => ({ id: d.id, name: d.name, online: (heartbeats.get(d.id)?.at ?? 0) > Date.now() - 25_000, ready: heartbeats.get(d.id)?.ready ?? false })) });
+        if (p === '/api/queue/config' && method === 'GET') { if (!queueScope) fail('queue_protocol_disabled',403); const grant=url.searchParams.has('deviceId')?deviceScope(url.searchParams.get('deviceId')):queueScope;if(!grant)fail('device_not_found',404);const chats=desktop.config(grant.deviceId);return json(res,200,{ ...grant, executionMode:desktop.executionMode(grant.deviceId), protocolVersion:2,...(queueScopes.some(g=>g.mode==='personal-projects')?{projectCatalog:mobileCatalog()}:{}),...(chats.length?{desktopSync:true,desktopConversations:chats}:{}),...(url.searchParams.has('realtime')?{realtime:true}:{}) }); }
+        if (p === '/api/devices' && method === 'GET') return json(res, 200, { devices: Object.values(store.data.devices).filter(d => !d.revoked && (!queueScope || deviceScope(d.id))).map(d => ({ id: d.id, name: d.name, online: (heartbeats.get(d.id)?.at ?? 0) > Date.now() - 25_000, ready: heartbeats.get(d.id)?.ready ?? false })) });
         if (p === '/api/pairing' && method === 'POST') {
           const data = await body(req, 4096); object(data, ['deviceId', 'name']); identifier(data.deviceId); string(data.name, 80);
-          if (queueScope && data.deviceId !== queueScope.deviceId) fail('queue_scope_rejected',403);
+          if (queueScope && !deviceScope(data.deviceId)) fail('queue_scope_rejected',403);
           if (pairs.size >= 100 || Object.keys(store.data.devices).length >= 20 && !Object.hasOwn(store.data.devices, data.deviceId)) fail('device_capacity', 429);
           for (const [key, value] of pairs) if (value.id === data.deviceId) pairs.delete(key);
           const code = secret(); pairs.set(digest(code), { id: data.deviceId, name: data.name, expires: Date.now() + 300_000 });
@@ -251,7 +294,7 @@ export async function createBusinessServer(options = {}) {
           return json(res, 202, submit(sync[1], 'sessions.sync', value, clientIntentId));
         }
         const projects = /^\/api\/devices\/([A-Za-z0-9_-]+)\/projects$/.exec(p);
-        if (projects && method === 'GET') { hasDevice(projects[1]); return json(res, 200, { projects: (store.data.projects[projects[1]] ?? []).filter(p => !queueScope || p.id === queueScope.projectId) }); }
+        if (projects && method === 'GET') { hasDevice(projects[1]); return json(res, 200, { projects: (store.data.projects[projects[1]] ?? []).filter(p => !queueScope || queueProjectAllowed(deviceScope(projects[1]),p.id)) }); }
         const conversations = /^\/api\/devices\/([A-Za-z0-9_-]+)\/conversations$/.exec(p);
         if (conversations && method === 'POST') {
           const data = await body(req, 4096); object(data, ['projectId', 'clientIntentId']); project(conversations[1], data.projectId);
@@ -262,6 +305,35 @@ export async function createBusinessServer(options = {}) {
           if (!cached || cached.expires < Date.now()) fail('catalog_refresh_required', 409);
           return json(res, 200, cached.value);
         }
+        const desktopRoute=/^\/api\/conversations\/([A-Za-z0-9_-]+)\/desktop\/(history|events|approvals)(?:\/([A-Za-z0-9_-]+))?$/.exec(p);
+        if(desktopRoute){
+          const [,conversationId,action,intentId]=desktopRoute;ownedConversation(conversationId);desktop.owner(conversationId);
+          if(action==='history'&&method==='GET')return json(res,200,desktop.read(conversationId,{cursor:url.searchParams.get('cursor')}));
+          if(action==='approvals'&&method==='POST'&&!intentId)return json(res,200,desktop.submit(conversationId,await body(req,4096)));
+          if(action==='approvals'&&method==='GET'&&intentId)return json(res,200,desktop.receipt(conversationId,intentId));
+          if(action==='events'&&method==='GET'){
+            if(desktopSubscribers.size>=1000)fail('stream_capacity',429);
+            res.writeHead(200,{'content-type':'text/event-stream','x-accel-buffering':'no'});
+            const send=value=>{if(res.destroyed)return;if(res.writableLength>1024*1024)return res.destroy();res.write('data: '+JSON.stringify(value)+'\n\n');};
+            const unsubscribe=desktop.subscribe(conversationId,send),s={req,res,conversationId,send};desktopSubscribers.add(s);req.on('close',()=>{unsubscribe();desktopSubscribers.delete(s);});return;
+          }fail('endpoint_not_found',404);
+        }
+        const liveRoute=/^\/api\/conversations\/([A-Za-z0-9_-]+)\/queue\/(live|events|observations|metrics)$/.exec(p);
+        if(liveRoute){
+          if(!queueScope)fail('queue_protocol_disabled',403);
+          const [,conversationId,action]=liveRoute;ownedConversation(conversationId);
+          if(action==='live'&&method==='GET'){const h=heartbeats.get(conversationScope(conversationId).deviceId);return json(res,200,{...projection.read(conversationId),online:Boolean(h?.at>Date.now()-25000&&h.ready)});}
+          if(action==='metrics'&&method==='GET')return json(res,200,projection.metrics(conversationId));
+          if(action==='observations'&&method==='POST')return json(res,200,projection.observe(conversationId,await body(req,4096)));
+          if(action==='events'&&method==='GET'){
+            if(queueSubscribers.size>=1000)fail('stream_capacity',429);
+            res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-store','x-accel-buffering':'no'});
+            const send=event=>{if(res.destroyed)return;if(res.writableLength>1024*1024)return res.destroy();res.write('data: '+JSON.stringify(event)+'\n\n');};
+            const unsubscribe=projection.subscribe(conversationId,send),subscriber={req,res,conversationId,send};queueSubscribers.add(subscriber);
+            req.on('close',()=>{unsubscribe();queueSubscribers.delete(subscriber);});return;
+          }
+          fail('endpoint_not_found',404);
+        }
         const upload = /^\/api\/conversations\/([A-Za-z0-9_-]+)\/attachments$/.exec(p);
         const queueRoute = /^\/api\/conversations\/([A-Za-z0-9_-]+)\/queue(?:\/(status|cancel|stop))?$/.exec(p);
         if (queueRoute && method === 'POST') {
@@ -270,6 +342,8 @@ export async function createBusinessServer(options = {}) {
           const fields = action === 'enqueue' ? ['clientIntentId','text'] : action === 'cancel' ? ['clientIntentId','intentId','expectedRevision'] : action === 'stop' ? ['clientIntentId','sessionId'] : ['clientIntentId','intentId'];
           object(data,fields,action === 'status' ? ['clientIntentId'] : fields);
           const {clientIntentId,...args} = data;
+          const routeGrant=deviceScope(conversation.deviceId);
+          if (action === 'enqueue' && routeGrant && queueChats(routeGrant).find(c=>c.id===queueRoute[1])?.archived) fail('archived_conversation_readonly',403);
           const operation = action === 'stop' ? 'queue.consumer.stop' : 'queue.'+action;
           return json(res,202,submit(conversation.deviceId,operation,{...args,conversationId:queueRoute[1],...(action === 'enqueue' ? {intentId:clientIntentId}:{})},clientIntentId));
         }
@@ -321,7 +395,7 @@ export async function createBusinessServer(options = {}) {
           return;
         }
         const job = /^\/api\/jobs\/([A-Za-z0-9_-]+)$/.exec(p);
-        if (job && method === 'GET') { const value=board.get(job[1]), scope=store.data.scopes[value.id]??{}; if(queueScope && (value.deviceId!==queueScope.deviceId || !acceptedOperations.includes(value.operation) || scope.projectId && scope.projectId!==queueScope.projectId || scope.conversationId && scope.conversationId!==queueScope.conversationId)) fail('job_not_found',404); return json(res, 200, value); }
+        if (job && method === 'GET') { const value=board.get(job[1]), scope=store.data.scopes[value.id]??{},grant=deviceScope(value.deviceId); if(queueScope && (!grant || !acceptedOperations.includes(value.operation) || scope.projectId && !queueProjectAllowed(grant,scope.projectId) || scope.conversationId && !queueConversationAllowed(grant,scope.conversationId))) fail('job_not_found',404); return json(res, 200, value); }
         fail('endpoint_not_found', 404);
       }
       fail('endpoint_not_found', 404);
@@ -336,6 +410,7 @@ export async function createBusinessServer(options = {}) {
   server.requestTimeout = 35_000; server.headersTimeout = 10_000;
   server.on('upgrade', (_req, socket) => socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'));
   server.on('connect', (_req, socket) => socket.destroy());
+  const liveHeartbeat=setInterval(()=>{projection.prune();desktop.prune();for(const s of desktopSubscribers){const g=desktop.owner(s.conversationId);if(!authenticated(s.req)||store.data.devices[g.deviceId]?.revoked){s.res.end();continue;}s.res.write(': heartbeat\n\n');}for(const s of queueSubscribers){if(!authenticated(s.req)){s.res.end();continue;}const health=projection.health(s.conversationId),deviceId=conversationScope(s.conversationId).deviceId,h=heartbeats.get(deviceId);s.send({...health,online:Boolean(h?.at>Date.now()-25000&&h.ready)});}},2000);liveHeartbeat.unref();
   const sweep = setInterval(() => {
     for (const [key, value] of sessions) if (value.expires < Date.now()) sessions.delete(key);
     for (const [key, value] of pairs) if (value.expires < Date.now()) pairs.delete(key);
@@ -346,11 +421,11 @@ export async function createBusinessServer(options = {}) {
     for (const subscriber of subscribers) { if (!authenticated(subscriber.req)) { subscriber.res.end(); subscribers.delete(subscriber); continue; } if (subscriber.res.writableLength > 1024 * 1024) subscriber.res.destroy(); else subscriber.res.write(': heartbeat\n\n'); }
   }, 5000); sweep.unref();
   return { server, origin, listen: (port = Number(process.env.RMT_BUSINESS_PORT ?? 3230), host = process.env.RMT_BUSINESS_HOST ?? '127.0.0.1') => new Promise((resolve, reject) => { if (queueTest && !['127.0.0.1','localhost'].includes(host)) return reject(Error('queue_protocol_loopback_only')); server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve(server.address()); }); }),
-    async close() { closing = true; clearInterval(sweep); for (const subscriber of subscribers) subscriber.res.end(); for (const res of waiting) if (!res.writableEnded) json(res, 503, { code: 'server_stopping' }); await new Promise(resolve => server.close(resolve)); store.close(); } };
+    async close() { closing = true; clearInterval(sweep);clearInterval(liveHeartbeat);for(const s of desktopSubscribers)s.res.end();desktop.close();for(const s of queueSubscribers)s.res.end();projection.close(); for (const subscriber of subscribers) subscriber.res.end(); for (const res of waiting) if (!res.writableEnded) json(res, 503, { code: 'server_stopping' }); await new Promise(resolve => server.close(resolve)); store.close(); } };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const service = await createBusinessServer({ queueTestScope: process.env.RMT_BUSINESS_QUEUE_SCOPE_FILE ? JSON.parse(fs.readFileSync(process.env.RMT_BUSINESS_QUEUE_SCOPE_FILE,'utf8')) : undefined }); const address = await service.listen();
+  const service = await createBusinessServer({ desktopScopes:process.env.RMT_BUSINESS_DESKTOP_SCOPE_FILE?JSON.parse(fs.readFileSync(process.env.RMT_BUSINESS_DESKTOP_SCOPE_FILE,'utf8')):undefined,queueTestScope: process.env.RMT_BUSINESS_QUEUE_SCOPE_FILE ? JSON.parse(fs.readFileSync(process.env.RMT_BUSINESS_QUEUE_SCOPE_FILE,'utf8')) : undefined }); const address = await service.listen();
   console.log(JSON.stringify({ event: 'business.listening', origin: service.origin, port: address.port }));
   for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => { void service.close(); });
 }

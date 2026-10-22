@@ -39,7 +39,9 @@ export class OwnerInbox {
       this.db.exec(`CREATE TABLE IF NOT EXISTS consumers(id TEXT PRIMARY KEY,turn_id TEXT NOT NULL,state TEXT NOT NULL,
         expires_at INTEGER NOT NULL,max_jobs INTEGER NOT NULL,taken INTEGER NOT NULL DEFAULT 0,waiting INTEGER NOT NULL DEFAULT 0,reason TEXT);
         CREATE UNIQUE INDEX IF NOT EXISTS one_consumer ON consumers((1)) WHERE state IN ('active','stopping');
-        CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,event TEXT NOT NULL,intent_id TEXT,session_id TEXT,revision INTEGER,reason TEXT);`);
+        CREATE TABLE IF NOT EXISTS progress(intent_id TEXT PRIMARY KEY,seq INTEGER NOT NULL,text TEXT NOT NULL,at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS audit(seq INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,event TEXT NOT NULL,intent_id TEXT,session_id TEXT,revision INTEGER,reason TEXT);
+        CREATE INDEX IF NOT EXISTS audit_intent_event ON audit(intent_id,event,at);`);
     });
     try { this.transaction(() => {
       const scope = this.db.prepare('SELECT thread_id FROM scope').get();
@@ -52,7 +54,8 @@ export class OwnerInbox {
     try { const value = fn(); this.db.exec('COMMIT'); return value; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  receipt(row) { const abandoned=Boolean(this.db.prepare("SELECT 1 FROM audit WHERE intent_id=? AND event='job.unknown_abandoned' LIMIT 1").get(row.intent_id)); return { intentId: row.intent_id, threadId: this.threadId, state: row.state, revision: row.revision,
+  receipt(row) { const progress=this.db.prepare('SELECT seq,text,at FROM progress WHERE intent_id=?').get(row.intent_id);const times=this.db.prepare("SELECT min(CASE WHEN event='job.leased' THEN at END) AS leasedAt,min(CASE WHEN event='job.completed' THEN at END) AS completedAt FROM audit WHERE intent_id=?").get(row.intent_id); const abandoned=Boolean(this.db.prepare("SELECT 1 FROM audit WHERE intent_id=? AND event='job.unknown_abandoned' LIMIT 1").get(row.intent_id)); return { intentId: row.intent_id, threadId: this.threadId, state: row.state, revision: row.revision,
+    timing:{enqueuedAt:row.created_at,...(times.leasedAt==null?{}:{leasedAt:times.leasedAt}),...(times.completedAt==null?{}:{completedAt:times.completedAt}),...(progress?{firstProgressAt:this.db.prepare("SELECT min(at) AS at FROM audit WHERE intent_id=? AND event='job.progress'").get(row.intent_id).at}: {})},...(progress?{progress:{...progress}}:{}),
     cancelRequested: Boolean(row.cancel_requested), consumerTurnId: row.consumer_turn ?? null, sessionId: row.session_id ?? null,
     outcomeUncertain: row.state === 'unknown' || abandoned, ...(abandoned ? {resolution:'abandoned_unknown'} : {}),
     ...(row.result == null ? {} : { result: row.result }) }; }
@@ -113,6 +116,26 @@ export class OwnerInbox {
       this.db.prepare("UPDATE jobs SET state='completed',result=?,result_hash=?,revision=revision+1 WHERE intent_id=?").run(result, fingerprint, intentId);
       const done = this.get(intentId); this.event('job.completed', done); this.finishSession(row.session_id); return this.receipt(done);
     });
+  }
+  progress(intentId,leaseToken,seq,text,consumerTurnId){
+    if(!validText(text)||!Number.isSafeInteger(seq)||seq<1)throw failure('invalid_inbox_progress');
+    return this.transaction(()=>{
+      const row=this.owned(intentId,leaseToken,consumerTurnId);
+      if(row.state!=='leased')throw failure('inbox_outcome_unknown');
+      if(row.cancel_requested)throw failure('inbox_cancel_requested');
+      const old=this.db.prepare('SELECT * FROM progress WHERE intent_id=?').get(intentId);
+      if(old?.seq===seq&&old.text===text)return this.receipt(row);
+      if(seq!==(old?.seq??0)+1)throw failure('inbox_progress_conflict');
+      this.db.prepare('INSERT INTO progress(intent_id,seq,text,at) VALUES (?,?,?,?) ON CONFLICT(intent_id) DO UPDATE SET seq=excluded.seq,text=excluded.text,at=excluded.at').run(intentId,seq,text,Date.now());
+      this.event('job.progress',row);return this.receipt(row);
+    });
+  }
+  reply(intentId,leaseToken,result,consumerTurnId){
+    // Completion atomically checks cancellation. A cancelled answer is never published.
+    const row=this.owned(intentId,leaseToken,consumerTurnId);
+    if(row.state==='cancelled')return this.receipt(row);
+    try{return this.complete(intentId,leaseToken,result,consumerTurnId);}
+    catch(error){if(error.code!=='inbox_cancel_requested')throw error;return this.ackCancel(intentId,leaseToken,consumerTurnId);}
   }
   cancel(intentId, expectedRevision) {
     return this.transaction(() => {

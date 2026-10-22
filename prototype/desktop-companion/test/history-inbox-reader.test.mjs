@@ -1,0 +1,21 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { OwnerInbox } from '../src/inbox.mjs';
+import { HistoryInboxReader } from '../src/history-inbox-reader.mjs';
+test('idle metadata polling never expires, recovers or alters an existing consumer', t => {
+  const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'history-inbox-')), inbox = new OwnerInbox({ runtime, threadId: 'original' });
+  t.after(() => { inbox.close(); fs.rmSync(runtime, { recursive: true, force: true }); });
+  inbox.enqueue('pending', 'private body must not be read by the receiver');
+  inbox.db.prepare("INSERT INTO consumers(id,turn_id,state,expires_at,max_jobs) VALUES('s','t','active',1,10)").run();
+  const reader = new HistoryInboxReader({ database: path.join(runtime, 'inbox.sqlite'), conversationId: 'original', now: () => 1000 });
+  t.after(() => reader.close());
+  const before = inbox.db.prepare('SELECT * FROM consumers').all(), audit = inbox.db.prepare('SELECT count(*) AS n FROM audit').get();
+  const result = reader.snapshot(); assert.equal(result.consumer.state, 'closed'); assert.equal(result.receipts[0].intentId, 'pending');
+  assert(!JSON.stringify(result).includes('private body'));
+  assert.deepEqual(inbox.db.prepare('SELECT * FROM consumers').all(), before);
+  assert.deepEqual(inbox.db.prepare('SELECT count(*) AS n FROM audit').get(), audit);
+  assert.throws(() => new HistoryInboxReader({ database: path.join(runtime, 'inbox.sqlite'), conversationId: 'other' }), /history_inbox_scope_rejected/);
+});

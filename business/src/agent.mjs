@@ -1,3 +1,4 @@
+import { QueuePublisher } from './queue-publisher.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -19,7 +20,7 @@ export async function startAgent(config) {
   if (origin.protocol !== 'https:' && !(origin.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(origin.hostname))) throw new Error('https_required');
   if (origin.pathname !== '/' || origin.username || origin.password || origin.search || origin.hash) throw new Error('invalid_origin');
   const store = new JsonStore(config.stateFile, { token: null, receipts: {}, events: [] });
-  let stopped = false, active = null, processing = false;
+  let stopped = false, active = new Map(), processing = false;
   const log = config.log ?? (value => console.log(JSON.stringify({ at: new Date().toISOString(), ...value })));
   let lastNetworkLog = 0;
   function diagnostic(event, error, task) {
@@ -28,10 +29,10 @@ export async function startAgent(config) {
     const reason = /list_turns is not supported/.test(message) ? 'history_not_materialized' : /empty/.test(message) ? 'empty_rollout' : /fetch failed|timeout|abort/i.test(message) ? 'network_unavailable' : 'operation_failed';
     log({ event, reason, code: error?.code ?? null, status: error?.status ?? null, errorFingerprint: crypto.createHash('sha256').update(message).digest('hex').slice(0, 16), ...(task ? { jobId: task.id, operation: task.operation, state: store.data.receipts[task.id]?.state } : {}), nativeReady: adapter.ready() });
   }
-  async function call(route, data, authenticated = true) {
-    const response = await fetch(origin.origin + route, { method: 'POST', signal: AbortSignal.timeout(25000), headers: { 'content-type': 'application/json', ...(authenticated ? { authorization: `Bearer ${store.data.token}`, 'x-device-id': config.deviceId } : {}) }, body: JSON.stringify(data) });
+  async function call(route, data, authenticated = true, timeoutMs = 25000) {
+    const response = await fetch(origin.origin + route, { method: 'POST', signal: AbortSignal.timeout(timeoutMs), headers: { 'content-type': 'application/json', ...(authenticated ? { authorization: `Bearer ${store.data.token}`, 'x-device-id': config.deviceId } : {}) }, body: JSON.stringify(data) });
     const result = await response.json();
-    if (!response.ok) throw Object.assign(new Error(result.code ?? 'business_request_failed'), { status: response.status });
+    if (!response.ok) throw Object.assign(new Error(result.code ?? 'business_request_failed'), { status: response.status,code:result.code });
     return result;
   }
   try {
@@ -64,7 +65,7 @@ export async function startAgent(config) {
   const isReady = () => typeof adapter.ready === 'function' ? adapter.ready() : adapter.getState?.().ready === true;
   await adapter.start();
   async function heartbeat() {
-    const value = await call('/api/agent/heartbeat', { active: active ? [{ id: active.id, leaseToken: active.leaseToken }] : [], ready: isReady() });
+    const value = await call('/api/agent/heartbeat', { active: [...active.values()].map(t=>({id:t.id,leaseToken:t.leaseToken})), ready: isReady() });
     for (const job of value.reconcile) {
       const receipt = store.data.receipts[job.id];
       if (receipt && receipt.fingerprint === job.fingerprint && ['succeeded', 'rejected'].includes(receipt.state)) await call(`/api/agent/tasks/${job.id}/reconcile`, { fingerprint: job.fingerprint, state: receipt.state, ...(receipt.result ? { result: receipt.result } : { code: receipt.code }) });
@@ -83,12 +84,17 @@ export async function startAgent(config) {
   }
   await heartbeat();
   const timer = setInterval(maintenance, 5000);
-  const loop = (async () => {
+  let publisher;
+  if(config.realtime===true&&remoteScope&&adapter.subscribeQueue){publisher=new QueuePublisher({adapter,call,log});try{await publisher.start();}catch(error){publisher.stop();clearInterval(timer);await adapter.stop();store.close();throw error;}}
+  const queueWrites=['queue.enqueue','queue.cancel','queue.consumer.stop'];
+  const lanes=config.realtime===true&&(remoteScope||config.enableLocalQueueTest===true)?[accepts.filter(o=>queueWrites.includes(o)),accepts.filter(o=>!queueWrites.includes(o))].filter(l=>l.length):[accepts];
+  const loops=lanes.map(lane=>(async () => {let current;
+
     while (!stopped) {
       try {
-        const { task } = await call('/api/agent/tasks/claim', { accepts });
+        const { task } = await call('/api/agent/tasks/claim', { accepts:lane });
         if (!task || stopped) continue;
-        active = task;
+        active.set(task.id,task);current=task;
         await call(`/api/agent/tasks/${task.id}/ack`, { leaseToken: task.leaseToken });
         let receipt = store.data.receipts[task.id];
         if (!receipt) {
@@ -100,11 +106,11 @@ export async function startAgent(config) {
           store.save();
         }
         await call(`/api/agent/tasks/${task.id}/result`, { leaseToken: task.leaseToken, state: receipt.state, ...(receipt.result ? { result: receipt.result } : { code: receipt.code }) });
-        active = null; await maintenance();
-      } catch (error) { diagnostic('business.worker.request_failed', error, active); active = null; if (!stopped) await delay(1500); }
+        active.delete(task.id);current=null; if(config.realtime===true)void maintenance();else await maintenance();
+      } catch (error) { diagnostic('business.worker.request_failed', error, current); if(current)active.delete(current.id);current=null; if (!stopped) await delay(1500); }
     }
-  })();
-  return { async stop() { stopped = true; clearInterval(timer); await adapter.stop(); await loop; store.close(); }, adapter };
+  })());
+  return { lanes:loops.length, async stop() { stopped = true; clearInterval(timer);publisher?.stop(); await adapter.stop(); await Promise.all(loops); store.close(); }, adapter };
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const config = JSON.parse(fs.readFileSync(process.env.RMT_BUSINESS_AGENT_CONFIG, 'utf8'));

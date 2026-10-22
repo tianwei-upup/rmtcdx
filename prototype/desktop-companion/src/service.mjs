@@ -1,3 +1,4 @@
+import { InboxService } from './inbox-service.mjs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { failure } from './app-tools.mjs';
@@ -97,37 +98,7 @@ export class CompanionService {
   async execute(request) {
     if (request.operation === 'status') return this.status();
     if (request.operation.startsWith('inbox_') && request.threadId != null && request.threadId !== this.scope.callerThreadId) throw failure('test_thread_not_allowed');
-    if (request.operation === 'inbox_open') return this.consumer.open(request.consumerTurnId, request.windowMs, request.maxJobs);
-    if (request.operation === 'inbox_close') return this.consumer.stop(request.sessionId, 'owner_closed', request.consumerTurnId);
-    if (request.operation === 'inbox_consumer_stop') return this.consumer.stop(request.sessionId);
-    if (request.operation === 'inbox_enqueue') return this.inbox.enqueue(request.intentId, request.text);
-    if (request.operation === 'inbox_job') return this.inbox.receipt(this.inbox.get(request.intentId));
-    if (request.operation === 'inbox_cancel') return this.inbox.cancel(request.intentId, request.expectedRevision);
-    if (request.operation === 'inbox_queue_status') return { receipts: request.intentId ? [this.inbox.receipt(this.inbox.get(request.intentId))] : this.inbox.receipts().slice(-100), consumer: this.consumer.status() };
-    if (request.operation === 'inbox_checkpoint') return this.inbox.checkpoint(request.intentId, request.leaseToken, request.consumerTurnId);
-    if (request.operation === 'inbox_ack_cancel') return this.inbox.ackCancel(request.intentId, request.leaseToken, request.consumerTurnId);
-    if (request.operation === 'inbox_take') {
-      const deadline = Date.now() + Math.min(20000, Math.max(0, request.waitMs ?? 0));
-      this.consumer.waiting(request.sessionId, request.consumerTurnId, true);
-      try {
-      do {
-        if (this.stopped) throw failure('inbox_wait_cancelled');
-        if (request.signal?.aborted) { this.consumer.stop(request.sessionId, 'request_cancelled', request.consumerTurnId); throw failure('inbox_wait_cancelled'); }
-        const job = this.consumer.take(request.sessionId, request.consumerTurnId);
-        if (job.status !== 'empty' || Date.now() >= deadline) {
-          if (job.status === 'empty') this.inbox.event('consumer.empty', {session_id:request.sessionId});
-          this.log({ event: 'inbox.take', status: job.status, intentId: job.intentId, consumerThreadId: this.scope.callerThreadId, consumerTurnId: request.consumerTurnId ?? null });
-          return job;
-        }
-        await new Promise(resolve => setTimeout(resolve, 100));
-      } while (true);
-      } finally { if (!this.stopped) this.consumer.waiting(request.sessionId, request.consumerTurnId, false); }
-    }
-    if (request.operation === 'inbox_complete') {
-      const receipt = this.inbox.complete(request.intentId, request.leaseToken, request.result, request.consumerTurnId);
-      this.log({ event: 'inbox.completed', intentId: request.intentId, consumerThreadId: this.scope.callerThreadId, consumerTurnId: request.consumerTurnId ?? null });
-      return receipt;
-    }
+    if (request.operation.startsWith('inbox_')) return InboxService.prototype.dispatch.call(this,{...request,threadId:this.scope.callerThreadId});
     if (request.operation === 'receipt') {
       this.allowed(request.threadId);
       const receipt = this.receipts[request.intentId];

@@ -5,8 +5,8 @@ import path from 'node:path';
 export async function serveLocal(runtime, service, shutdown) {
   const endpoint = path.join(runtime, 'control.sock'), sockets = new Set();
   const server = net.createServer(socket => {
-    sockets.add(socket); socket.setEncoding('utf8'); let buffer = '';
-    socket.on('error', () => {}); socket.on('close', () => sockets.delete(socket));
+    sockets.add(socket); socket.setEncoding('utf8'); let buffer = '';const controller=new AbortController();
+    socket.on('error', () => {}); socket.on('close', () => {sockets.delete(socket);controller.abort();});
     socket.on('data', data => {
       buffer += data;
       if (Buffer.byteLength(buffer) > 128 * 1024) return socket.destroy();
@@ -17,7 +17,7 @@ export async function serveLocal(runtime, service, shutdown) {
           let request;
           try {
             request = JSON.parse(line);
-            const result = request.operation === 'stop' ? { stopping: true } : await service.execute(request);
+            const result = request.operation === 'stop' ? { stopping: true } : await service.execute({...request,signal:controller.signal});
             if (!socket.destroyed) socket.write(JSON.stringify({ id: request.id, result }) + '\n');
             if (request.operation === 'stop') setTimeout(shutdown, 50);
           } catch (error) {

@@ -1,0 +1,51 @@
+{
+  "objects": [
+    {
+      "type": "table",
+      "name": "_sqlx_migrations",
+      "sql": "CREATE TABLE _sqlx_migrations (\n    version BIGINT PRIMARY KEY,\n    description TEXT NOT NULL,\n    installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,\n    success BOOLEAN NOT NULL,\n    checksum BLOB NOT NULL,\n    execution_time BIGINT NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "queued_items",
+      "sql": "CREATE TABLE queued_items (\n    id TEXT PRIMARY KEY NOT NULL,\n    thread_id TEXT NOT NULL,\n    payload_json TEXT NOT NULL,\n    queue_order INTEGER NOT NULL,\n    created_at_ms INTEGER NOT NULL,\n    updated_at_ms INTEGER NOT NULL\n)"
+    },
+    {
+      "type": "table",
+      "name": "queued_thread_revisions",
+      "sql": "CREATE TABLE queued_thread_revisions (\n    revision INTEGER PRIMARY KEY AUTOINCREMENT,\n    thread_id TEXT NOT NULL UNIQUE\n)"
+    },
+    {
+      "type": "index",
+      "name": "queued_items_thread_order_idx",
+      "sql": "CREATE UNIQUE INDEX queued_items_thread_order_idx\n    ON queued_items(thread_id, queue_order)"
+    },
+    {
+      "type": "trigger",
+      "name": "queued_items_revision_after_delete",
+      "sql": "CREATE TRIGGER queued_items_revision_after_delete\nAFTER DELETE ON queued_items\nBEGIN\n    INSERT INTO queued_thread_revisions (thread_id)\n    VALUES (OLD.thread_id)\n    ON CONFLICT(thread_id) DO UPDATE\n    SET revision = (SELECT COALESCE(MAX(revision), 0) + 1 FROM queued_thread_revisions);\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "queued_items_revision_after_insert",
+      "sql": "CREATE TRIGGER queued_items_revision_after_insert\nAFTER INSERT ON queued_items\nBEGIN\n    INSERT INTO queued_thread_revisions (thread_id)\n    VALUES (NEW.thread_id)\n    ON CONFLICT(thread_id) DO UPDATE\n    SET revision = (SELECT COALESCE(MAX(revision), 0) + 1 FROM queued_thread_revisions);\nEND"
+    },
+    {
+      "type": "trigger",
+      "name": "queued_items_revision_after_update",
+      "sql": "CREATE TRIGGER queued_items_revision_after_update\nAFTER UPDATE ON queued_items\nBEGIN\n    INSERT INTO queued_thread_revisions (thread_id)\n    VALUES (NEW.thread_id)\n    ON CONFLICT(thread_id) DO UPDATE\n    SET revision = (SELECT COALESCE(MAX(revision), 0) + 1 FROM queued_thread_revisions);\nEND"
+    }
+  ],
+  "migrations": [
+    {
+      "version": 1,
+      "description": "queued items",
+      "checksum": "cea113c9a74fe4ed12cf41951b57c66ca375a14a722ac28d41bc06a096ed3e1d777ac0710c5377e8cd75f645c99ca03c"
+    },
+    {
+      "version": 2,
+      "description": "queued thread revisions",
+      "checksum": "983a2b17b454feb00d7c221d7f556e900e7f9ade4aef395e854ed9093fa21237fd3fd93f99c66758b489c0f376f56570"
+    }
+  ]
+}
