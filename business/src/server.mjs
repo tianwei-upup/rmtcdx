@@ -1,3 +1,4 @@
+import {PersonalCatalog,catalogRevision} from './personal-catalog.mjs';
 import { QueueProjection } from './queue-projection.mjs';
 import { DesktopRelay } from './desktop-relay.mjs';
 import { historyJson } from './history-json.mjs';
@@ -69,6 +70,10 @@ export async function createBusinessServer(options = {}) {
   const directories = new Map(), snapshots = new Map(), eventLogs = new Map(), subscribers = new Set();
   const projection=new QueueProjection({grants:queueScopes}),queueSubscribers=new Set();
   const desktop=new DesktopRelay({scopes:options.desktopScopes,queueScopes}),desktopSubscribers=new Set();
+  const catalogSubscribers=new Set();
+  const personalCatalog=new PersonalCatalog({grants:queueScopes,store,onChange:(old,next)=>{projection.replacePersonal(old,next);desktop.replacePersonal(next);for(const sub of [...desktopSubscribers,...queueSubscribers])if(!conversationScope(sub.conversationId))sub.res.end();for(const sub of catalogSubscribers)sub.res.write('data: '+JSON.stringify({revision:catalogRevision(mobileCatalog())})+'\n\n');}});
+  // Restore desktop membership after loading the persisted source catalog.
+  for(const g of queueScopes.filter(g=>g.autoDiscover))desktop.replacePersonal(g);
   const cookieName = origin.startsWith('https:') ? '__Host-rmt-business' : 'rmt-business';
   let closing = false;
   const authenticated = req => {
@@ -94,8 +99,9 @@ export async function createBusinessServer(options = {}) {
     if ([...board.jobs.values()].some(job => job.intentId === intentId)) return board.submit(deviceId, operation, value, intentId);
     const heartbeat = heartbeats.get(deviceId);
     if (!heartbeat?.ready || heartbeat.at < Date.now() - 25_000) fail('device_offline', 409);
+    if(operation==='queue.enqueue'&&queueScope?.autoDiscover&&!personalCatalog.fresh(deviceId))fail('catalog_source_stale',409);
     const job = board.submit(deviceId, operation, value, intentId);
-    if (!Object.hasOwn(store.data.scopes, job.id)) { store.data.scopes[job.id] = { ...(value.projectId ? { projectId: value.projectId } : {}), ...(value.conversationId ? { conversationId: value.conversationId } : {}), ...(value.attachmentId ? { attachmentId: value.attachmentId } : {}), ...(QUEUE_OPERATIONS.includes(operation) && value.intentId ? {queueIntentId:value.intentId}:{}), ...(QUEUE_OPERATIONS.includes(operation) && value.sessionId ? {queueSessionId:value.sessionId}:{}) }; store.save(); }
+    if (!Object.hasOwn(store.data.scopes, job.id)) { store.data.scopes[job.id] = { ...(operation==='queue.enqueue'&&queueScope?.autoDiscover?{catalogBinding:queueChats(queueScope).find(c=>c.id===value.conversationId)?.binding}:{}),...(value.projectId ? { projectId: value.projectId } : {}), ...(value.conversationId ? { conversationId: value.conversationId } : {}), ...(value.attachmentId ? { attachmentId: value.attachmentId } : {}), ...(QUEUE_OPERATIONS.includes(operation) && value.intentId ? {queueIntentId:value.intentId}:{}), ...(QUEUE_OPERATIONS.includes(operation) && value.sessionId ? {queueSessionId:value.sessionId}:{}) }; store.save(); }
     return job;
   }
   function ownedConversation(conversationId, deviceId) {
@@ -169,7 +175,7 @@ export async function createBusinessServer(options = {}) {
     try {
       const url = new URL(req.url, origin), p = url.pathname, method = req.method;
       if(queueScope && method==='GET' && (p==='/devices/mac/' || queueScope.mode==='project-readonly' && p==='/devices/mac-owner-inbox-test/' && !deviceScope('mac-owner-inbox-test'))){res.writeHead(302,{'location':`/devices/${queueScopes.find(g=>g.mode==='personal-projects')?.deviceId??queueScope.deviceId}/`,'content-type':'text/plain'});return res.end('Dedicated test queue');}
-      if (method === 'GET' && (['/', '/app.js', '/style.css', '/chat-state.mjs', '/markdown.mjs', '/business-client.mjs', '/queue-app.js', '/queue-state.mjs', '/queue-live.mjs', '/desktop-live.mjs', '/desktop-history.mjs', '/desktop-merge.mjs', '/queue.css'].includes(p) || /^\/devices\/[A-Za-z0-9_-]+\/$/.test(p))) {
+      if (method === 'GET' && (['/', '/app.js', '/style.css', '/chat-state.mjs', '/markdown.mjs', '/business-client.mjs', '/queue-app.js', '/queue-state.mjs', '/queue-live.mjs','/catalog-live.mjs', '/desktop-live.mjs', '/desktop-history.mjs', '/desktop-merge.mjs', '/queue.css'].includes(p) || /^\/devices\/[A-Za-z0-9_-]+\/$/.test(p))) {
         if (queueScope && p.startsWith('/devices/') && !deviceScope(p.split('/')[2])) fail('device_not_found', 404);
         const filename = p === '/' || p.startsWith('/devices/') ? queueScope ? 'queue.html' : 'index.html' : p.slice(1);
         const content = fs.readFileSync(path.resolve(here, '../dist', filename));
@@ -205,6 +211,9 @@ export async function createBusinessServer(options = {}) {
       }
       if (p.startsWith('/api/agent/')) {
         const deviceId = device(req);
+        if(p==='/api/agent/catalog/ping'&&method==='POST'){const data=await body(req,1024);object(data,['revision']);return json(res,200,personalCatalog.ping(deviceId,data.revision));}
+        if(p==='/api/agent/catalog'&&method==='GET')return json(res,200,{revision:personalCatalog.revision(deviceId)});
+        if(p==='/api/agent/catalog'&&method==='POST')return json(res,200,personalCatalog.publish(deviceId,await body(req,4*1024*1024)));
         if(p.startsWith('/api/agent/desktop/')&&method==='POST'){
           const data=await body(req,32*1024*1024),action=p.slice('/api/agent/desktop/'.length);
           if(action==='hello'){object(data,['epoch','conversationIds']);return json(res,200,desktop.hello(deviceId,data));}
@@ -217,8 +226,8 @@ export async function createBusinessServer(options = {}) {
           if(action==='result'){object(data,['epoch','intentId','state','code'],['epoch','intentId','state']);return json(res,200,desktop.result(deviceId,data));}
           fail('endpoint_not_found',404);
         }
-        if(p==='/api/agent/queue/hello'&&method==='POST'){const data=await body(req,65536);object(data,['epoch','conversationIds'],['epoch']);return json(res,200,projection.hello(deviceId,data.epoch,data.conversationIds));}
-        if(p==='/api/agent/queue/ping'&&method==='POST'){const data=await body(req,65536);object(data,['epoch','conversationIds'],['epoch']);return json(res,200,projection.ping(deviceId,data.epoch,data.conversationIds));}
+        if(p==='/api/agent/queue/hello'&&method==='POST'){const data=await body(req,512*1024);object(data,['epoch','conversationIds'],['epoch']);return json(res,200,projection.hello(deviceId,data.epoch,data.conversationIds));}
+        if(p==='/api/agent/queue/ping'&&method==='POST'){const data=await body(req,512*1024);object(data,['epoch','conversationIds'],['epoch']);return json(res,200,projection.ping(deviceId,data.epoch,data.conversationIds));}
         if(p==='/api/agent/queue/projection'&&method==='POST'){const data=await body(req);ownedConversation(data.conversationId,deviceId);return json(res,200,projection.update(deviceId,data));}
         if (p === '/api/agent/heartbeat' && method === 'POST') {
           const data = await body(req, 16384); object(data, ['active', 'ready']);
@@ -234,7 +243,8 @@ export async function createBusinessServer(options = {}) {
           try {
             do {
               const task = board.claim(deviceId, data.accepts);
-              if (task) return json(res, 200, { task });
+              if(task?.operation==='queue.enqueue'){const g=deviceScope(deviceId),sc=store.data.scopes[task.id],c=g&&queueChats(g).find(c=>c.id===sc?.conversationId);if(g&&(!c||c.archived||c.workspaceAvailable===false||sc.catalogBinding&&sc.catalogBinding!==c.binding)){board.reject(deviceId,task.id,task.leaseToken,'rejected','precondition_rejected');continue;}}
+              if (task) return json(res, 200, { task:{...task,...(store.data.scopes[task.id]?.catalogBinding?{catalogBinding:store.data.scopes[task.id].catalogBinding}:{})} });
               if (res.destroyed || closing) return;
               await new Promise(resolve => setTimeout(resolve, 100));
             } while (Date.now() < until);
@@ -274,7 +284,11 @@ export async function createBusinessServer(options = {}) {
       if (p.startsWith('/api/')) {
         if (!authenticated(req)) fail('login_required', 401);
         if (!['GET', 'HEAD'].includes(method) && req.headers.origin !== origin) fail('origin_rejected', 403);
-        if (p === '/api/queue/config' && method === 'GET') { if (!queueScope) fail('queue_protocol_disabled',403); const grant=url.searchParams.has('deviceId')?deviceScope(url.searchParams.get('deviceId')):queueScope;if(!grant)fail('device_not_found',404);const chats=desktop.config(grant.deviceId);return json(res,200,{ ...grant, executionMode:desktop.executionMode(grant.deviceId), protocolVersion:2,...(queueScopes.some(g=>g.mode==='personal-projects')?{projectCatalog:mobileCatalog()}:{}),...(chats.length?{desktopSync:true,desktopConversations:chats}:{}),...(url.searchParams.has('realtime')?{realtime:true}:{}) }); }
+        if (p === '/api/queue/config' && method === 'GET') { if (!queueScope) fail('queue_protocol_disabled',403); const grant=url.searchParams.has('deviceId')?deviceScope(url.searchParams.get('deviceId')):queueScope;if(!grant)fail('device_not_found',404);const chats=desktop.config(grant.deviceId);return json(res,200,{ ...grant, executionMode:desktop.executionMode(grant.deviceId), protocolVersion:2,...(queueScopes.some(g=>g.autoDiscover)?{catalogRevision:catalogRevision(mobileCatalog())}:{}),...(queueScopes.some(g=>g.mode==='personal-projects')?{projectCatalog:mobileCatalog()}:{}),...(chats.length?{desktopSync:true,desktopConversations:chats}:{}),...(url.searchParams.has('realtime')?{realtime:true}:{}) }); }
+        if(p==='/api/catalog/revision'&&method==='GET')return json(res,200,{revision:catalogRevision(mobileCatalog())});
+        if(p==='/api/catalog/events'&&method==='GET'){
+          if(catalogSubscribers.size>=1000)fail('stream_capacity',429);res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-store','x-accel-buffering':'no'});res.write('data: '+JSON.stringify({revision:catalogRevision(mobileCatalog())})+'\n\n');const sub={req,res};catalogSubscribers.add(sub);req.on('close',()=>catalogSubscribers.delete(sub));return;
+        }
         if (p === '/api/devices' && method === 'GET') return json(res, 200, { devices: Object.values(store.data.devices).filter(d => !d.revoked && (!queueScope || deviceScope(d.id))).map(d => ({ id: d.id, name: d.name, online: (heartbeats.get(d.id)?.at ?? 0) > Date.now() - 25_000, ready: heartbeats.get(d.id)?.ready ?? false })) });
         if (p === '/api/pairing' && method === 'POST') {
           const data = await body(req, 4096); object(data, ['deviceId', 'name']); identifier(data.deviceId); string(data.name, 80);
@@ -309,6 +323,7 @@ export async function createBusinessServer(options = {}) {
         if(desktopRoute){
           const [,conversationId,action,intentId]=desktopRoute;ownedConversation(conversationId);desktop.owner(conversationId);
           if(action==='history'&&method==='GET')return json(res,200,desktop.read(conversationId,{cursor:url.searchParams.get('cursor')}));
+          if(action==='approvals'&&method==='POST'&&!intentId&&conversationScope(conversationId)?.autoDiscover&&!personalCatalog.fresh(conversationScope(conversationId).deviceId))fail('catalog_source_stale',409);
           if(action==='approvals'&&method==='POST'&&!intentId)return json(res,200,desktop.submit(conversationId,await body(req,4096)));
           if(action==='approvals'&&method==='GET'&&intentId)return json(res,200,desktop.receipt(conversationId,intentId));
           if(action==='events'&&method==='GET'){
@@ -343,6 +358,7 @@ export async function createBusinessServer(options = {}) {
           object(data,fields,action === 'status' ? ['clientIntentId'] : fields);
           const {clientIntentId,...args} = data;
           const routeGrant=deviceScope(conversation.deviceId);
+          if(action==='enqueue'&&routeGrant&&queueChats(routeGrant).find(c=>c.id===queueRoute[1])?.workspaceAvailable===false)fail('workspace_unavailable',403);
           if (action === 'enqueue' && routeGrant && queueChats(routeGrant).find(c=>c.id===queueRoute[1])?.archived) fail('archived_conversation_readonly',403);
           const operation = action === 'stop' ? 'queue.consumer.stop' : 'queue.'+action;
           return json(res,202,submit(conversation.deviceId,operation,{...args,conversationId:queueRoute[1],...(action === 'enqueue' ? {intentId:clientIntentId}:{})},clientIntentId));
@@ -410,7 +426,7 @@ export async function createBusinessServer(options = {}) {
   server.requestTimeout = 35_000; server.headersTimeout = 10_000;
   server.on('upgrade', (_req, socket) => socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'));
   server.on('connect', (_req, socket) => socket.destroy());
-  const liveHeartbeat=setInterval(()=>{projection.prune();desktop.prune();for(const s of desktopSubscribers){const g=desktop.owner(s.conversationId);if(!authenticated(s.req)||store.data.devices[g.deviceId]?.revoked){s.res.end();continue;}s.res.write(': heartbeat\n\n');}for(const s of queueSubscribers){if(!authenticated(s.req)){s.res.end();continue;}const health=projection.health(s.conversationId),deviceId=conversationScope(s.conversationId).deviceId,h=heartbeats.get(deviceId);s.send({...health,online:Boolean(h?.at>Date.now()-25000&&h.ready)});}},2000);liveHeartbeat.unref();
+  const liveHeartbeat=setInterval(()=>{projection.prune();desktop.prune();for(const sub of catalogSubscribers){if(!authenticated(sub.req))sub.res.end();else if(sub.res.writableLength>1024*1024)sub.res.destroy();else sub.res.write(': heartbeat\n\n');}for(const s of desktopSubscribers){if(!conversationScope(s.conversationId)){s.res.end();continue;}const g=desktop.owner(s.conversationId);if(!authenticated(s.req)||store.data.devices[g.deviceId]?.revoked){s.res.end();continue;}s.res.write(': heartbeat\n\n');}for(const s of queueSubscribers){if(!authenticated(s.req)||!conversationScope(s.conversationId)){s.res.end();continue;}const health=projection.health(s.conversationId),deviceId=conversationScope(s.conversationId).deviceId,h=heartbeats.get(deviceId);s.send({...health,online:Boolean(h?.at>Date.now()-25000&&h.ready)});}},2000);liveHeartbeat.unref();
   const sweep = setInterval(() => {
     for (const [key, value] of sessions) if (value.expires < Date.now()) sessions.delete(key);
     for (const [key, value] of pairs) if (value.expires < Date.now()) pairs.delete(key);
@@ -421,7 +437,7 @@ export async function createBusinessServer(options = {}) {
     for (const subscriber of subscribers) { if (!authenticated(subscriber.req)) { subscriber.res.end(); subscribers.delete(subscriber); continue; } if (subscriber.res.writableLength > 1024 * 1024) subscriber.res.destroy(); else subscriber.res.write(': heartbeat\n\n'); }
   }, 5000); sweep.unref();
   return { server, origin, listen: (port = Number(process.env.RMT_BUSINESS_PORT ?? 3230), host = process.env.RMT_BUSINESS_HOST ?? '127.0.0.1') => new Promise((resolve, reject) => { if (queueTest && !['127.0.0.1','localhost'].includes(host)) return reject(Error('queue_protocol_loopback_only')); server.once('error', reject); server.listen(port, host, () => { server.removeListener('error', reject); resolve(server.address()); }); }),
-    async close() { closing = true; clearInterval(sweep);clearInterval(liveHeartbeat);for(const s of desktopSubscribers)s.res.end();desktop.close();for(const s of queueSubscribers)s.res.end();projection.close(); for (const subscriber of subscribers) subscriber.res.end(); for (const res of waiting) if (!res.writableEnded) json(res, 503, { code: 'server_stopping' }); await new Promise(resolve => server.close(resolve)); store.close(); } };
+    async close() { closing = true; clearInterval(sweep);clearInterval(liveHeartbeat);for(const s of catalogSubscribers)s.res.end();for(const s of desktopSubscribers)s.res.end();desktop.close();for(const s of queueSubscribers)s.res.end();projection.close(); for (const subscriber of subscribers) subscriber.res.end(); for (const res of waiting) if (!res.writableEnded) json(res, 503, { code: 'server_stopping' }); await new Promise(resolve => server.close(resolve)); store.close(); } };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

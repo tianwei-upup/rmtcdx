@@ -14,6 +14,11 @@ export class DesktopPublisher {
     if(!this.lazy)for(const chat of this.chats)if(this.isAllowed(chat))this.connect(chat);
     this.timer=setInterval(()=>void this.maintain(),2000);this.loop=this.claims();return this;
   }
+  async updateChats(chats){
+    const next=new Map(chats.map(c=>[c.id,c]));
+    for(const [id,e]of this.entries){const c=next.get(id);if(!c||c.cwd!==e.chat.cwd||c.projectId!==e.chat.projectId||c.archived!==e.chat.archived||c.approvals!==e.chat.approvals){clearTimeout(e.timer);e.stream.close();this.entries.delete(id);}else e.chat=c;}
+    this.chats=chats;await this.hello();
+  }
   hello(){return this.call('/api/agent/desktop/hello',{epoch:this.epoch,conversationIds:this.chats.map(c=>c.id)});}
   connect(chat){
     if(this.stopped)return;const old=this.entries.get(chat.id);if(old){clearTimeout(old.timer);old.stream.close();}

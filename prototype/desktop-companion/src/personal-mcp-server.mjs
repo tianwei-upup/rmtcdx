@@ -8,6 +8,7 @@ import {control} from './control.mjs';
 const file=path.resolve(process.argv[2]),config=readPrivate(file,null),scope=new PersonalScope(config);
 const drains=new Set(['status','inbox_queue_status','inbox_checkpoint','inbox_complete','inbox_reply','inbox_ack_cancel','inbox_cancel','inbox_close']);
 const server=projectMcp({runtime:config.manifest.runtime,grant:{conversations:config.manifest.chats},
+ isAllowed:id=>{try{scope.check(id);return true;}catch{return false;}},
  getExecutionMode:id=>!id||scope.check(id).archived?'readonly':'desktop',
  call:async(_runtime,request,timeout,options)=>{
   const chat=scope.check(request.threadId,{write:!drains.has(request.operation)}),event={at:new Date().toISOString(),operation:request.operation,threadId:request.threadId,turnId:request.consumerTurnId,projectId:chat.projectId,...(request.intentId?{intentId:request.intentId}:{})};

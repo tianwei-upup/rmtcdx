@@ -18,13 +18,23 @@ export class DesktopRelay {
     }
     this.projection=this.scopes.size?new DesktopProjection({conversationIds:[...this.scopes.values()].flatMap(s=>[...s.chats.keys()]),now}):null;
   }
+  replacePersonal(grant){
+    const s=this.scope(grant.deviceId),next=new Map(queueChats(grant).map(c=>[c.id,{id:c.id,approvals:!c.archived&&c.workspaceAvailable!==false,binding:c.binding}]));
+    for(const [id,c]of s.chats)if(!next.has(id)||next.get(id).binding!==c.binding||next.get(id).approvals!==c.approvals){
+      this.projection.invalidate(id,'catalog_changed');
+      for(const r of this.intents.values())if(r.conversationId===id&&['queued','claimed'].includes(r.state)){r.state=r.state==='claimed'?'unknown':'rejected';r.code='desktop_approval_stale';}
+      for(const [key,page]of this.projection.pages)if(page.id===id)this.projection.pages.delete(key);
+      if(!next.has(id)){this.projection.states.delete(id);this.projection.ids.delete(id);this.projection.listeners.delete(id);this.publishers.get(grant.deviceId)?.ids.delete(id);}
+    }
+    for(const id of next.keys())this.projection.ids.add(id);s.chats=next;
+  }
   scope(deviceId,id){const s=this.scopes.get(deviceId);if(!s||id&&!s.chats.has(id))fail('desktop_scope_rejected',403);return s;}
   owner(id){const s=[...this.scopes.values()].find(s=>s.chats.has(id));if(!s)fail('desktop_scope_rejected',403);return s;}
   config(deviceId){return [...(this.scopes.get(deviceId)?.chats.values()??[])];}
   executionMode(deviceId){return this.scopes.get(deviceId)?.executionMode??'readonly';}
   hello(deviceId,{epoch,conversationIds}){
     identifier(epoch);const s=this.scope(deviceId),old=this.publishers.get(deviceId);
-    if(!Array.isArray(conversationIds)||!conversationIds.length||new Set(conversationIds).size!==conversationIds.length||conversationIds.some(id=>!s.chats.has(id)))fail('desktop_scope_rejected',403);
+    if(!Array.isArray(conversationIds)||new Set(conversationIds).size!==conversationIds.length||conversationIds.some(id=>!s.chats.has(id)))fail('desktop_scope_rejected',403);
     if(old&&old.epoch!==epoch&&this.now()-old.at<8000)fail('desktop_publisher_busy',409);
     if(old?.epoch!==epoch){for(const id of s.chats.keys())this.projection.invalidate(id,'desktop_epoch_changed');for(const r of this.intents.values())if(r.deviceId===deviceId&&['queued','claimed'].includes(r.state))r.state=r.state==='queued'?'rejected':'unknown';}
     this.publishers.set(deviceId,{epoch,ids:new Set(conversationIds),at:this.now()});return {ok:true};

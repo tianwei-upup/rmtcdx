@@ -101,7 +101,7 @@ export async function startAgent(config) {
           // Persist BEFORE native side effects. An unknown receipt never executes again.
           receipt = { fingerprint: task.fingerprint, state: 'unknown', code: 'execution_unknown', ...(remoteScope && task.operation==='queue.status'?{queueReadExpiresAt:Date.now()+600000}:{}) };
           store.data.receipts[task.id] = receipt; store.save();
-          try { receipt.result = await adapter.execute(task.operation, task.input, task.id); receipt.state = 'succeeded'; delete receipt.code; }
+          try { receipt.result = await adapter.execute(task.operation, task.input, task.id, {catalogBinding:task.catalogBinding}); receipt.state = 'succeeded'; delete receipt.code; }
           catch (error) { diagnostic('business.execution.failed', error, task); receipt.state = error.code === 'precondition_rejected' || READS.has(task.operation) ? 'rejected' : 'unknown'; receipt.code = receipt.state === 'rejected' ? 'precondition_rejected' : 'execution_unknown'; }
           store.save();
         }

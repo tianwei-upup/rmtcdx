@@ -10,7 +10,7 @@ export class ScopedHistoryStream extends EventEmitter {
   const {signature,state,chat}=this.history.read(this.conversationId);
   if(chat.archived||!chat.workspaceAvailable){this.native?.close();this.native=null;}
   if(!this.native?.ready){if(this.mode==='native'){this.epoch=crypto.randomUUID();this.revision=0;}this.mode='snapshot';this.capabilities={historySnapshot:true,nativeIncrementalText:false,approvals:false,archived:chat.archived,workspaceAvailable:chat.workspaceAvailable,mobileReceive:!chat.archived&&chat.workspaceAvailable};
-   if(signature!==this.signature||!this.ready){this.signature=signature;this.state=structuredClone(state);if(chat.archived)for(const t of this.state.turns)if(t.status==='inProgress')t.status='interrupted';this.ready=true;this.revision++;this.emit('state');}
+   if(signature!==this.signature||this.lastArchive!==chat.archived||this.lastAvailable!==chat.workspaceAvailable||!this.ready){this.signature=signature;this.lastArchive=chat.archived;this.lastAvailable=chat.workspaceAvailable;this.state=structuredClone(state);if(chat.archived)for(const t of this.state.turns)if(t.status==='inProgress')t.status='interrupted';this.ready=true;this.revision++;this.emit('state');}
   }
   if(!chat.archived&&chat.workspaceAvailable&&!this.native&&Date.now()>(this.retryAfter??0))this.attach();
  }catch(e){this.native?.close();this.native=null;this.invalidate(e.code??'history_unavailable');}}

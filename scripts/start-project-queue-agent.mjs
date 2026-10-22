@@ -21,7 +21,7 @@ try{
   if(!login.ok)throw Error('business_login_failed');const cookie=login.headers.get('set-cookie').split(';')[0];
   const api=async(route,data)=>{const r=await fetch(base.origin+route,{method:data===undefined?'GET':'POST',headers:{origin:base.origin,cookie,'content-type':'application/json'},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error('catalog_request_failed_'+r.status);return r.json();};
   // Verify the deployed grant BEFORE pairing or advertising capabilities.
-  if(JSON.stringify(queueTestScope(await (async()=>{const {protocolVersion,desktopSync,desktopConversations,realtime,executionMode,projectCatalog,...scope}=await api('/api/queue/config?deviceId='+grant.deviceId);return scope;})()))!==JSON.stringify(grant))throw Error('server_scope_mismatch');
+  if(JSON.stringify(queueTestScope(await (async()=>{const {protocolVersion,desktopSync,desktopConversations,realtime,executionMode,projectCatalog,catalogRevision,...scope}=await api('/api/queue/config?deviceId='+grant.deviceId);return scope;})()))!==JSON.stringify(grant))throw Error('server_scope_mismatch');
   const stateFile=path.join(config.runtime,'agent.json');let pairCode;
   if(!fs.existsSync(stateFile))pairCode=(await api('/api/pairing',{deviceId:grant.deviceId,name:'Mac · '+(grant.projectName??'实时性验收')})).code;
   agent=await startAgent({origin:base.origin,deviceId:grant.deviceId,stateFile,pairCode,adapter:new ProjectQueueAdapter(queue),queueTestScope:grant,realtime:config.realtime===true});

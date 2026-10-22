@@ -6,6 +6,7 @@ export class QueueProjection {
   constructor({grants,now=Date.now,maxBytes=32*1024*1024}){
     this.grants=grants;this.now=now;this.maxBytes=maxBytes;this.publishers=new Map();this.snapshots=new Map();this.listeners=new Map();this.observations=new Map();
   }
+  replacePersonal(old,next){const ids=new Set(queueChats(next).map(c=>c.id));for(const c of queueChats(old))if(!ids.has(c.id)){this.emit(c.id,{type:'queue.reset',epoch:null});this.snapshots.delete(c.id);this.listeners.delete(c.id);this.publishers.get(next.deviceId)?.ids.delete(c.id);}}
   grant(deviceId){return this.grants.find(g=>g.deviceId===deviceId)??fail('queue_scope_rejected',403);}
   owner(conversationId){return this.grants.find(g=>queueConversationAllowed(g,conversationId))??fail('conversation_not_found',404);}
   membership(deviceId,ids){const g=this.grant(deviceId);ids??=queueChats(g).map(c=>c.id);if(!Array.isArray(ids)||ids.length>(g.mode==='personal-projects'?5000:500)||new Set(ids).size!==ids.length||ids.some(id=>!queueConversationAllowed(g,id)))fail('queue_scope_rejected',403);return new Set(ids);}

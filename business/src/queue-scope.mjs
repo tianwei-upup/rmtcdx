@@ -4,18 +4,19 @@ import { object, identifier, string, fail, QUEUE_OPERATIONS } from './contracts.
 export function queueTestScope(value) {
   if (value == null) return null;
   if(value.mode==='personal-projects'){
-    object(value,['mode','deviceId','projects']);identifier(value.deviceId);
-    if(!Array.isArray(value.projects)||!value.projects.length||value.projects.length>100)fail('invalid_queue_scope');
+    object(value,['mode','deviceId','projects','autoDiscover'],['mode','deviceId','projects']);identifier(value.deviceId);if(value.autoDiscover!==undefined&&value.autoDiscover!==true)fail('invalid_queue_scope');
+    if(!Array.isArray(value.projects)||value.projects.length>100)fail('invalid_queue_scope');
     const projects=value.projects.map(p=>{object(p,['id','name','available','conversations']);identifier(p.id);string(p.name,100);if(typeof p.available!=='boolean'||!Array.isArray(p.conversations)||p.conversations.length>1000)fail('invalid_queue_scope');const g=queueTestScope({mode:'project-readonly',deviceId:value.deviceId,projectId:p.id,projectName:p.name,conversations:p.conversations.length?p.conversations:[{id:'empty-project-placeholder',title:'placeholder',archived:true}]});return Object.freeze({id:p.id,name:p.name,available:p.available,conversations:Object.freeze(p.conversations.length?g.conversations:[])});});
     const ids=projects.flatMap(p=>p.conversations.map(c=>c.id));if(ids.length>5000||new Set(ids).size!==ids.length||new Set(projects.map(p=>p.id)).size!==projects.length)fail('invalid_queue_scope');
-    return Object.freeze({mode:value.mode,deviceId:value.deviceId,projects:Object.freeze(projects)});
+    return Object.freeze({mode:value.mode,deviceId:value.deviceId,projects:Object.freeze(projects),...(value.autoDiscover?{autoDiscover:true}:{})});
   }
   if (value.mode === 'project-readonly') {
     object(value, ['mode','deviceId','projectId','projectName','conversations']);
     identifier(value.deviceId); identifier(value.projectId); string(value.projectName,100);
-    if (!Array.isArray(value.conversations) || !value.conversations.length || value.conversations.length>500) fail('invalid_queue_scope');
+    if (!Array.isArray(value.conversations) || !value.conversations.length || value.conversations.length>5000) fail('invalid_queue_scope');
     const conversations=value.conversations.map(c=>{
-      object(c,['id','title','archived']); identifier(c.id); string(c.title,200);
+      object(c,['id','title','archived','workspaceAvailable','binding'],['id','title','archived']); identifier(c.id); string(c.title,200);
+      if(c.workspaceAvailable!==undefined&&typeof c.workspaceAvailable!=='boolean'||c.binding!==undefined&&!/^[0-9a-f]{64}$/.test(c.binding))fail('invalid_queue_scope');
       if(typeof c.archived!=='boolean') fail('invalid_queue_scope');
       return Object.freeze({...c});
     });

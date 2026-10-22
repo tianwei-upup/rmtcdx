@@ -1,9 +1,9 @@
 const DEFINITIVE = new Set(['device_offline', 'invalid_fields', 'invalid_id', 'invalid_string', 'invalid_turn', 'invalid_image', 'image_type_mismatch']);
 export class BusinessClient {
   constructor({ fetcher = (...args) => fetch(...args), storage = sessionStorage, sleep = ms => new Promise(r => setTimeout(r, ms)) } = {}) { this.fetcher = fetcher; this.storage = storage; this.sleep = sleep; }
-  async api(route, body) {
+  async api(route, body, {timeoutMs=25000}={}) {
     let response;
-    try { response = await this.fetcher(route, { method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(25000) }); }
+    try { response = await this.fetcher(route, { method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) }); }
     catch { throw Object.assign(new Error('network_unavailable'), { code: 'network_unavailable', uncertain: body !== undefined }); }
     const value = await response.json();
     if (!response.ok) throw Object.assign(new Error(value.code || 'request_failed'), { code: value.code, status: response.status });
