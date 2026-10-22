@@ -5,6 +5,7 @@ import { QueueState } from './queue-state.mjs';
 import { markdown, copyText } from './markdown.mjs';
 const $=id=>document.getElementById(id),client=new BusinessClient({storage:localStorage});
 let state=new QueueState(),config,rootConfig,catalog=[],projectId,selectionVersion=0,route,polling=false,busy=false,timer,selected,live,liveAvailable=false,liveConnected=false,follow=true,desktopHistory=null,catalogLive;
+let projectPickerOpen=false;
 const traces=new Map(),states=new Map(),drafts=new Map(),rows=new Map();
 const normalChats=p=>(p?.conversations??[]).filter(c=>!c.archived);
 const allChats=()=>catalog.flatMap(p=>p.conversations.map(c=>({...c,projectId:p.id,workspaceAvailable:c.workspaceAvailable??p.available})));
@@ -35,6 +36,7 @@ function controls(){
   $('enqueue').disabled=busy||!state.online||Boolean(pending)||archived||unavailable||!selected||config?.queueWrites===false||!hasText;
   $('stopReply').disabled=busy||!state.online||archived;$('text').disabled=archived||unavailable||!selected;$('text').placeholder=archived?'已归档的会话':unavailable?'项目目录不存在，仅查看历史':!selected?'当前项目暂无未归档会话':'发送消息';
   $('showChats').disabled=$('context').disabled=busy;$('recovery').hidden=!pending;
+  if($('projectToggle'))$('projectToggle').disabled=busy;
   $('retryPending').hidden=!pending||!state.prompts.has(pending.id);$('retryPending').disabled=busy||!state.online;
   $('reconcile').disabled=$('refresh').disabled=polling||busy;
   const desktopMode=config?.executionMode==='desktop';
@@ -82,9 +84,58 @@ function resizeInput(){const input=$('text');input.style.height='auto';input.sty
 function renderChats(){
   const query=$('search').value.trim().toLocaleLowerCase(),chats=normalChats(catalog.find(p=>p.id===projectId));
   if($('projectSelect')){$('projectSelect').replaceChildren(...catalog.map(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.name+'（'+normalChats(p).length+'）';return o;}));$('projectSelect').value=projectId;}
+  renderProjectPicker();
   const buttons=chats.filter(c=>c.title.toLocaleLowerCase().includes(query)).map(c=>{const b=document.createElement('button');b.type='button';b.className='session-row';b.dataset.chatId=c.id;b.setAttribute('aria-current',String(c.id===selected));b.disabled=busy;const title=document.createElement('span');title.className='session-title';title.textContent=c.title;b.append(title);b.onclick=()=>{if(!busy){selectChat(c.id);$('drawer').close();}};return b;});$('chatList').replaceChildren(...buttons);$('noChats').hidden=buttons.length>0;$('noChats').textContent=query?'没有找到匹配的会话':'当前项目暂无未归档会话';
 }
-function openDrawer(){renderChats();$('drawer').showModal();$('showChats').setAttribute('aria-expanded','true');}
+function renderProjectPicker(){
+  if(!$('projectToggle'))return;const current=catalog.find(p=>p.id===projectId);
+  $('currentProjectName').textContent=current?.name??'选择项目';$('currentProjectCount').textContent=normalChats(current).length+' 个会话';$('projectToggle').setAttribute('aria-label','当前项目：'+(current?.name??'未选择')+'，切换项目');
+  if(!projectPickerOpen)return;const query=$('projectSearch').value.trim().toLocaleLowerCase(),projects=catalog.filter(p=>p.name.toLocaleLowerCase().includes(query)),list=$('projectList'),scroll=list.scrollTop,focused=document.activeElement?.closest('.project-option')?.dataset.projectId;
+  list.replaceChildren(...projects.map(p=>{const row=$('projectOptionTemplate').content.firstElementChild.cloneNode(true);row.dataset.projectId=p.id;row.setAttribute('aria-current',String(p.id===projectId));row.disabled=busy;row.querySelector('.project-option-name').textContent=p.name;row.querySelector('.project-option-meta').textContent=normalChats(p).length+' 个会话'+(p.available===false?' · 目录不可用':'');row.onclick=()=>chooseProject(p.id);return row;}));
+  list.hidden=projects.length===0;list.scrollTop=scroll;if(focused)[...list.children].find(row=>row.dataset.projectId===focused)?.focus({preventScroll:true});$('projectMatches').textContent=projects.length+' 个';$('noProjects').hidden=projects.length>0;
+}
+function setProjectPicker(open){
+  if(!$('projectPanel'))return;projectPickerOpen=open;$('drawer').dataset.projectPicker=open?'open':'closed';$('projectPanel').hidden=!open;$('projectToggle').setAttribute('aria-expanded',String(open));
+  if(open){$('projectSearch').value='';renderProjectPicker();$('projectList').scrollTop=0;}else $('projectSearch').blur();
+}
+function chooseProject(id){
+  if(busy||!catalog.some(p=>p.id===id))return;const changed=projectId!==id;projectId=id;if(changed)$('search').value='';setProjectPicker(false);renderChats();$('projectToggle')?.focus({preventScroll:true});if(changed)void selectChat(normalChats(catalog.find(p=>p.id===id))[0]?.id);
+}
+function openDrawer(){if(busy||$('workspace').hidden||$('drawer').open)return;setProjectPicker(false);renderChats();$('drawer').showModal();$('showChats').setAttribute('aria-expanded','true');}
+function bindDrawerSwipe(){
+  const drawer=$('drawer'),hasSelection=()=>Boolean(window.getSelection()?.toString());
+  const bind=(area,direction,enabled,activate,allowButtons=false)=>{let swipe=null;
+  area.addEventListener('touchstart',event=>{
+    swipe=null;if(event.touches.length!==1||!enabled()||hasSelection())return;
+    // Leave controls, code blocks and nested horizontal scrolling to the browser.
+    const target=event.target instanceof Element?event.target:event.target.parentElement;
+    if(target?.closest('input,textarea,select,label,summary,pre,table,.code-block,[contenteditable]:not([contenteditable="false"])'+(allowButtons?'':',a,button')))return;
+    for(let node=target;node&&node!==area;node=node.parentElement){if(node.scrollWidth>node.clientWidth+1&&/auto|scroll/.test(getComputedStyle(node).overflowX))return;}
+    const touch=event.touches[0];swipe={id:touch.identifier,x:touch.clientX,y:touch.clientY,at:performance.now(),version:selectionVersion,horizontal:false};
+  },{passive:true});
+  area.addEventListener('touchmove',event=>{
+    if(!swipe)return;
+    const touch=event.touches[0];if(event.touches.length!==1||touch.identifier!==swipe.id||!enabled()||hasSelection()||performance.now()-swipe.at>650){swipe=null;return;}
+    const dx=(touch.clientX-swipe.x)*direction,dy=Math.abs(touch.clientY-swipe.y);
+    if(dx < -12||(dy>12&&dy>=dx)){swipe=null;return;}
+    // WebView commits scrolling after the first uncancelled move. Reserve clear
+    // horizontal intent immediately; require the full distance only on release.
+    if(dx>0&&dx>dy*1.5)swipe.horizontal=true;
+    if(swipe.horizontal){if(!event.cancelable){swipe=null;return;}event.preventDefault();}
+  },{passive:false});
+  area.addEventListener('touchend',event=>{
+    const ended=swipe;swipe=null;if(!ended)return;
+    const touch=[...event.changedTouches].find(t=>t.identifier===ended.id);if(!touch)return;
+    if(ended.horizontal&&event.cancelable)event.preventDefault();
+    const dx=(touch.clientX-ended.x)*direction,dy=Math.abs(touch.clientY-ended.y),threshold=Math.max(60,Math.min(96,area.clientWidth*.18));
+    if(!event.touches.length&&enabled()&&ended.horizontal&&dx>=threshold&&dx>dy*2&&performance.now()-ended.at<=650&&ended.version===selectionVersion&&!hasSelection())activate();
+  },{passive:false});
+  area.addEventListener('touchcancel',()=>{swipe=null;},{passive:true});
+  };
+  bind($('chatScroll'),1,()=>!busy&&!$('workspace').hidden&&!drawer.open,openDrawer);
+  // A swipe on a chat row closes the drawer without activating that row.
+  bind(drawer,-1,()=>drawer.open,()=>drawer.close(),true);
+}
 async function refresh(){
   if(!config||!route||polling||document.hidden)return;desktopHistory?.refresh();polling=true;const currentRoute=route,currentState=state;controls();
   try{if(liveAvailable){await live.refresh();return;}const devices=await client.api('/api/devices'),device=devices.devices.find(d=>d.id===config.deviceId);if(route!==currentRoute||state!==currentState)return;state.online=Boolean(device?.online&&device?.ready);
@@ -131,7 +182,11 @@ async function cancelMessage(r){
 }
 function boot(){
   $('workspace').classList.toggle('native-shell',navigator.userAgent.includes(' CodexRemoteAndroid/'));
-  $('showChats').onclick=$('context').onclick=openDrawer;$('closeDrawer').onclick=()=>$('drawer').close();$('drawer').onclose=()=>$('showChats').setAttribute('aria-expanded','false');$('drawer').onclick=event=>{if(event.target===$('drawer')&&event.clientX>=$('drawer').getBoundingClientRect().right)$('drawer').close();};$('search').oninput=renderChats;if($('projectSelect'))$('projectSelect').onchange=()=>{projectId=$('projectSelect').value;$('search').value='';renderChats();const c=normalChats(catalog.find(p=>p.id===projectId))[0];void selectChat(c?.id);};
+  bindDrawerSwipe();
+  $('showChats').onclick=$('context').onclick=openDrawer;$('closeDrawer').onclick=()=>$('drawer').close();$('drawer').onclose=()=>{$('showChats').setAttribute('aria-expanded','false');setProjectPicker(false);};$('drawer').onclick=event=>{if(event.target===$('drawer')&&event.clientX>=$('drawer').getBoundingClientRect().right)$('drawer').close();};$('search').oninput=renderChats;if($('projectSelect'))$('projectSelect').onchange=()=>chooseProject($('projectSelect').value);
+  if($('projectToggle'))$('projectToggle').onclick=()=>setProjectPicker(!projectPickerOpen);
+  $('projectSearch')?.addEventListener('input',renderProjectPicker);
+  $('projectPanel')?.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();setProjectPicker(false);$('projectToggle').focus();return;}if(!['ArrowDown','ArrowUp','Home','End'].includes(event.key)||event.target instanceof HTMLInputElement&&['Home','End'].includes(event.key))return;const buttons=[...$('projectList').querySelectorAll('button:not(:disabled)')];if(!buttons.length)return;const index=buttons.indexOf(document.activeElement),next=event.key==='Home'?0:event.key==='End'?buttons.length-1:event.key==='ArrowDown'?Math.min(index+1,buttons.length-1):Math.max(index-1,0);event.preventDefault();buttons[next].focus();});
   $('dismissNotice').onclick=()=>notice();$('text').oninput=()=>{drafts.set(selected,$('text').value);resizeInput();};$('text').onkeydown=event=>{if(event.key==='Enter'&&!event.isComposing&&!event.shiftKey&&(event.ctrlKey||event.metaKey||!matchMedia('(pointer: coarse)').matches)){event.preventDefault();void sendMessage();}};
   $('composer').onsubmit=event=>{event.preventDefault();void sendMessage();};$('stopReply').onclick=()=>void cancelMessage(stopTarget());$('retryPending').onclick=()=>{const p=client.pending(route);if(p)void sendMessage(state.prompts.get(p.id),p.id);};$('refresh').onclick=$('reconcile').onclick=()=>void refresh();
   $('stopConsumer').onclick=async()=>{if(!state.consumer||busy)return;busy=true;controls();try{const value=await client.job(route+'/stop',{sessionId:state.consumer.sessionId},{writing:true,scope:state.consumer.sessionId,confirmation:confirmation(()=>state.consumer?.state!=='active'?{consumer:state.consumer}:null)});state.consumer=value.consumer;render();}catch(e){failure(e);}finally{busy=false;controls();}};

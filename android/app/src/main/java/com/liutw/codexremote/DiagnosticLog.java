@@ -32,7 +32,7 @@ final class DiagnosticLog {
         "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "WS"));
     private static final Set<String> EVENTS = new HashSet<>(Arrays.asList(
         "app.start", "app.pause", "app.resume", "app.destroy", "host.select", "host.configure",
-        "page.start", "page.finish", "navigation.allow", "navigation.block", "http.error", "network.error",
+        "page.start", "page.finish", "navigation.allow", "navigation.block", "navigation.back", "http.error", "network.error",
         "tls.error", "console.warn", "console.error", "console.reject", "cookies.state", "diagnostics.ready",
         "diagnostics.inject", "diagnostics.error", "fetch.start", "fetch.end", "fetch.error", "xhr.start",
         "xhr.end", "xhr.error", "ws.connect", "ws.open", "ws.close", "ws.error", "logs.clear",
@@ -95,6 +95,8 @@ final class DiagnosticLog {
                     } else if (Arrays.asList("redirected", "mainFrame", "clean", "qtCookiePresent", "cloudCookiePresent").contains(key)
                             && value instanceof Boolean) safe.put(key, value);
                     else if (key.equals("category") && Arrays.asList("cors", "network", "javascript", "other").contains(value))
+                        safe.put(key, value);
+                    else if (key.equals("action") && Arrays.asList("drawer_closed", "history", "exit", "root", "ui_check_timeout").contains(value))
                         safe.put(key, value);
                     else if (key.equals("error") && Arrays.asList("TypeError", "AbortError", "Error", "IOException",
                             "FileNotFoundException", "SecurityException", "ActivityNotFoundException").contains(value))

@@ -51,6 +51,8 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> fileCallback;
     private DiagnosticLog logs;
     private String diagnosticScript;
+    private boolean backPending;
+    private int backRequest;
 
     @Override public void onCreate(Bundle savedState) {
         super.onCreate(savedState);
@@ -354,13 +356,46 @@ public class MainActivity extends Activity {
         }
     }
     private void goBack() {
-        if (pages[active] != null && pages[active].canGoBack()) pages[active].goBack();
-        else new AlertDialog.Builder(this).setMessage("已在当前主机的起始页面").setPositiveButton("确定", null).show();
+        handleBack(false);
     }
     @SuppressWarnings("deprecation")
     @Override public void onBackPressed() {
-        if (pages[active] != null && pages[active].canGoBack()) pages[active].goBack();
-        else super.onBackPressed();
+        handleBack(true);
+    }
+    private void handleBack(boolean exitAtRoot) {
+        if (backPending) return;
+        WebView page = pages[active];
+        if (page == null) { finishBack(null, exitAtRoot); return; }
+        backPending = true;
+        int request = ++backRequest;
+        View root = getWindow().getDecorView();
+        // Navigation can discard a JS callback. Allow retry without assuming the
+        // drawer is closed while the renderer has not answered.
+        Runnable timeout = () -> {
+            if (!backPending || request != backRequest) return;
+            backPending = false;
+            if (!isFinishing() && !isDestroyed() && pages[active] == page)
+                logs.record(NAMES[active], "navigation.back", DiagnosticLog.data("action", "ui_check_timeout"));
+        };
+        root.postDelayed(timeout, 500);
+        // Fixed native-to-page UI action; no JavaScript interface or command bridge.
+        page.evaluateJavascript("(()=>{const d=document.getElementById('drawer');if(d?.tagName==='DIALOG'&&d.open){d.close();return true;}return false;})()", value -> {
+            if (!backPending || request != backRequest) return;
+            root.removeCallbacks(timeout);
+            backPending = false;
+            if (isFinishing() || isDestroyed() || pages[active] != page) return;
+            if ("true".equals(value)) logs.record(NAMES[active], "navigation.back", DiagnosticLog.data("action", "drawer_closed"));
+            else finishBack(page, exitAtRoot);
+        });
+    }
+    @SuppressWarnings("deprecation")
+    private void finishBack(WebView page, boolean exitAtRoot) {
+        if (isFinishing() || isDestroyed() || pages[active] != page) return;
+        String action = page != null && page.canGoBack() ? "history" : exitAtRoot ? "exit" : "root";
+        logs.record(NAMES[active], "navigation.back", DiagnosticLog.data("action", action));
+        if (action.equals("history")) page.goBack();
+        else if (exitAtRoot) super.onBackPressed();
+        else new AlertDialog.Builder(this).setMessage("已在当前主机的起始页面").setPositiveButton("确定", null).show();
     }
     private void showHelp() {
         new AlertDialog.Builder(this).setTitle("连接电脑上的 Codex")

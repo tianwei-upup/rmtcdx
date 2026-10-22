@@ -16,8 +16,8 @@ android {
         applicationId 'com.liutw.codexremote'
         minSdk 26
         targetSdk 34
-        versionCode 6
-        versionName '0.4.0'
+        versionCode 8
+        versionName '0.4.2'
         buildConfigField 'String', 'DEFAULT_WINDOWS_URL', groovy.json.JsonOutput.toJson(defaultWindowsUrl)
         testInstrumentationRunner 'android.test.InstrumentationTestRunner'
     }
