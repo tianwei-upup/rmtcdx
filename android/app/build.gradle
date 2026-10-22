@@ -1,10 +1,14 @@
 plugins { id 'com.android.application' }
 
-// Explicit direct-address builds remain supported. Normal builds ask for the
-// unified cloud address rather than silently embedding an old tunnel URL.
+// Personal builds open the existing ECS service without a setup step.
+// Both addresses can still be overridden for local/direct regression builds.
 def defaultWindowsUrl = providers.gradleProperty('windowsUrl').getOrElse('')
+def defaultCloudUrl = providers.gradleProperty('cloudUrl').getOrElse('https://47.95.141.18')
 if (defaultWindowsUrl && !(defaultWindowsUrl ==~ /https:\/\/[a-zA-Z0-9.-]+(?::[0-9]+)?\/?/)) {
     throw new GradleException('windowsUrl must be an HTTPS service origin')
+}
+if (defaultCloudUrl && !(defaultCloudUrl ==~ /https:\/\/[a-zA-Z0-9.-]+(?::[0-9]+)?/)) {
+    throw new GradleException('cloudUrl must be an HTTPS service origin without a trailing slash')
 }
 
 android {
@@ -16,9 +20,10 @@ android {
         applicationId 'com.liutw.codexremote'
         minSdk 26
         targetSdk 34
-        versionCode 8
-        versionName '0.4.2'
+        versionCode 10
+        versionName '0.4.4'
         buildConfigField 'String', 'DEFAULT_WINDOWS_URL', groovy.json.JsonOutput.toJson(defaultWindowsUrl)
+        buildConfigField 'String', 'DEFAULT_CLOUD_URL', groovy.json.JsonOutput.toJson(defaultCloudUrl)
         testInstrumentationRunner 'android.test.InstrumentationTestRunner'
     }
     compileOptions {

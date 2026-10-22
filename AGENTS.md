@@ -1,5 +1,7 @@
 # Codex Remote Android
 
+- 2026-10-22 UI 优化已上线 ECS 并在荣耀 `ACTH022325002169` 复验。批次 A/B/C 落地：字号下限 12px（原 7 处 10–11px）、触摸目标经 `elementFromPoint` 实测全部 ≥44px 命中区、桌面历史复制按钮改图标且流式时隐藏、顶栏加分隔线并计入 `env(safe-area-inset-top)`、侧栏改 88vw/360px（遮罩 29→47px）、正文行距 1.85→1.7、输入区 `+` 与发送键成组靠右、跳转按钮改用 `--composer-offset`。业务页列表/搜索/数量只统计未归档会话（`codex-adapter` 新增 `archived` 字段 + 输出契约放行），新增「显示/隐藏归档会话」开关；会话行显示相对时间与状态并按 `updatedAt` 倒序，项目按活跃度排序；队列页项目面板按端侧 recency 分「最近使用 / 全部项目」。原生壳深色模式菜单按钮改用主题背景色；网页移除手动主题选择。**深色割裂的根因是应用主题 `Theme.Material.Light` 让 WebView 恒报 `prefers-color-scheme: light`**，改为原生层用 `?theme=dark|light` 传参 + 同源同步脚本 `business/web/theme.js`（CSP `script-src 'self'` 禁内联脚本），302 重定向需保留 query。队列授权契约 `queue-scope.mjs` **未放宽**，队列页时间戳用端侧 recency 代替。发布：前端 44 文件热补丁服务 PID 68937 未变；完整发布 `20261022T084725Z-ui-opt` 服务器 **83/83 测试通过**、PID 变 71827，重启后需重新登录。`workbench exec` 有 30 秒超时，发布须后台执行并轮询日志。APK 0.4.4（versionCode 10）`artifacts/codex-remote-0.4.4-debug.apk`。方案与证据见 `docs/UI_OPTIMIZATION_PLAN.md`。
+
 - 2026-10-22 最新授权与实现：新增本机项目 / 会话已改为持续发现接入，不再维护本轮固定名单。兼容旧桌面目录和新版原生项目表 / `threads.name`；已配对个人服务通过版本 CAS 更新 ECS 精确成员，APK 用独立目录 SSE 与版本查询自动刷新，保留草稿 / 当前页面；默认列表 / 搜索 / 数量仅显示未归档会话，启动不恢复已归档会话。归档只读、未归档沿用桌面权限；新消息绑定当前项目 / cwd，源确认过期拒写。原 RN 15 条与独立 acceptance 仍归原进程，未重启桌面或全局 MCP。荣耀新建专用任务、两次原 ID 只读回复、刷新及归档 / 解除归档通过；真实新建项目仍仅隔离元数据链路验证。见 `docs/AUTO_DISCOVERY_VALIDATION.md`。
 
 - **2026-10-22 最新授权与上线范围**：当前 Mac 本机 47 个项目、848 条已有历史会话已接入（快照含 226 条归档），替代下文“仅 RN 15 ID”的历史限制。归档只读；未归档按原桌面会话沙箱/审批执行；目录不存在仍可读历史但不能执行。原 RN 15 个队列和长期消费者不迁移，新独立 `mac-personal` worker 负责其余 833 条，按项目 ID/会话 ID/原 cwd/实时归档状态核对；同目录命名项目保持独立。历史读原生 JSONL/zstd，不加载或取消归档；原生 follower 仅选中订阅，队列仍使用带回执的原子追加，无第二模型执行器、不 start/steer/interrupt。全局 `rmtcdx_mobile` MCP 已配置但没有热加载/重启桌面；已加载会话可通过绑定当前原生 turn/client_id 的普通命令兼容入口领取，仍受原沙箱/审批约束。超长工具详情展示带标记的首尾摘要，省略上传二进制正文，聊天文字/工具顺序保留。完整证据与限制见 `docs/PERSONAL_PROJECT_HISTORY_ACCESS.md`。
@@ -14,6 +16,7 @@
 - 上游功能改动导出至 `patches/remote-control.patch`；安装脚本按固定提交幂等应用，不恢复旧的独立补丁。
 - 云端不持久化聊天正文；默认向隔离测试项目发送只读提示词。用户显式授权的真实项目仅按固定会话名单接入只读队列，不打断或修改其他活跃会话。
 - `scripts/`: 本机启动、停止、验证和 Android 构建脚本。
+- `prototype/thin-bridge/`: 单执行器薄桥原型（唯一 owner launcher、桌面 JSONL↔WS 适配器、attach-only worker、单写者守卫）。非生产代码。**接续此项前先读 `docs/THIN_BRIDGE_HANDOVER.md`**——其中记录了已完成项、对真实 CLI 测得的 17 条事实、已证否的接入路径（不要重复尝试）与未闭环缺口。
 - `prototype/desktop-companion/`：桌面已加载的标准 MCP、唯一 owner/proxy 与持久化整轮锁；旧非原子 native 发送仅专用测试会话授权。业务默认只读；真实项目只允许下述显式授权的主动领取试点，见 `docs/DESKTOP_COMPANION_MCP.md`、`docs/DESKTOP_OWNER_ADMISSION.md`。
 - 当前消息入口采用桌面通过 MCP 主动领取本项目原子 Inbox，三条本机专用任务已通过；不调用 native start/steer，多条任务可共享 turn。消费退出后只排队、不自动唤醒；原型阶段记录见 `docs/DESKTOP_OWNER_PULL.md`。
 - 持续领取、取消恢复与业务队列协议 v2 已通过专用本机验收；开启有限消费窗口，取消采用 revision 和协作确认，unknown 仅本机显式放弃且保留结果未知标记。默认服务/worker 不开放队列；loopback 验收见 `docs/DESKTOP_OWNER_CONSUMER.md`。

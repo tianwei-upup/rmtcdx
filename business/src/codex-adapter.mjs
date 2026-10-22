@@ -95,7 +95,8 @@ export class CodexAdapter {
     try { archived = await this.threads({ ...params, archived: true }); }
     catch { archived = []; }
     const seen = new Set(active.map(thread => thread.id));
-    return [...active, ...archived.filter(thread => !seen.has(thread.id))];
+    // Tag the source list so the phone can tell archived threads apart.
+    return [...active.map(thread => ({ ...thread, archived: false })), ...archived.filter(thread => !seen.has(thread.id)).map(thread => ({ ...thread, archived: true }))];
   }
   ready() { return this.client.getState().ready; }
   project(id) { return this.projects.find(p => p.id === id) ?? fail('precondition_rejected'); }
@@ -112,7 +113,7 @@ export class CodexAdapter {
     return { thread, project };
   }
   conversation(thread, project) {
-    return { id: thread.id, projectId: project.id, title: String(thread.name || thread.preview || '新会话').slice(0, 200), status: thread.status?.type === 'active' ? 'running' : 'idle', updatedAt: Math.max(0, Math.floor(thread.updatedAt || Date.now() / 1000)) };
+    return { id: thread.id, projectId: project.id, title: String(thread.name || thread.preview || '新会话').slice(0, 200), status: thread.status?.type === 'active' ? 'running' : 'idle', updatedAt: Math.max(0, Math.floor(thread.updatedAt || Date.now() / 1000)), archived: thread.archived === true };
   }
   page(values, params, newest = false) {
     const version = fingerprint(values), size = params.pageSize ?? 30;
@@ -136,7 +137,7 @@ export class CodexAdapter {
     }
     if (operation === 'sessions.sync') {
       const project = this.project(params.projectId);
-      const threads = params.archived === true ? await this.threads({ archived: true, searchTerm: params.search, limit: 100 }) : await this.catalogThreads({ searchTerm: params.search, limit: 100 });
+      const threads = params.archived === true ? (await this.threads({ archived: true, searchTerm: params.search, limit: 100 })).map(thread => ({ ...thread, archived: true })) : await this.catalogThreads({ searchTerm: params.search, limit: 100 });
       const values = threads.filter(t => this.projectForThread(t)?.id === project.id).map(t => this.conversation(t, project));
       const page = this.page(values, params); result = { conversations: page.values, nextCursor: page.nextCursor };
     }

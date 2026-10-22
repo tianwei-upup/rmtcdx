@@ -3,7 +3,7 @@ export class ConversationState {
   constructor(id, title = '新聊天') {
     this.id = id; this.title = title; this.messages = []; this.draft = ''; this.files = [];
     this.status = 'idle'; this.turnId = null; this.sending = false; this.cursor = null; this.approvals = [];
-    this.finished = new Set(); this.events = new Set(); this.revision = 0; this.loaded = false;
+    this.finished = new Set(); this.events = new Set(); this.revision = 0; this.loaded = false; this.updatedAt = 0;
   }
   optimistic(text, images = []) {
     const message = { id: 'local-' + crypto.randomUUID(), role: 'user', text, images, pending: true };
@@ -47,7 +47,7 @@ export class ConversationState {
       this.turnId = alreadyFinished ? null : active;
       this.status = alreadyFinished ? this.status : value.conversation.status;
     }
-    this.title = value.conversation.title || '新聊天'; this.cursor = value.nextCursor; this.approvals = value.approvals; this.loaded = true; return true;
+    this.title = value.conversation.title || '新聊天'; this.updatedAt = value.conversation.updatedAt ?? this.updatedAt ?? 0; this.cursor = value.nextCursor; this.approvals = value.approvals; this.loaded = true; return true;
   }
 }
 export const nearBottom = (top, height, viewport) => height - top - viewport < 100;
@@ -72,7 +72,7 @@ export class ProjectPins {
 export class DirectoryCache {
   constructor(fetcher, { now = () => Date.now(), ttl = 30000 } = {}) { this.fetcher = fetcher; this.now = now; this.ttl = ttl; this.projects = []; this.entries = new Map(); this.known = new Map(); this.syncedAt = 0; this.pending = null; }
   get(id) { return this.entries.get(id) ?? { conversations: [], nextCursor: null, loaded: false }; }
-  remember(c) { if (!c?.id || !c.projectId) return; this.known.set(c.id, { value: { id: c.id, projectId: c.projectId, title: c.title || '新聊天', status: c.status || 'idle' }, expires: this.now() + 300000 }); }
+  remember(c) { if (!c?.id || !c.projectId) return; this.known.set(c.id, { value: { id: c.id, projectId: c.projectId, title: c.title || '新聊天', status: c.status || 'idle', updatedAt: c.updatedAt ?? 0 }, expires: this.now() + 300000 }); }
   conversations(id) { const list = this.get(id).conversations, ids = new Set(list.map(c => c.id)); return [...[...this.known.values()].filter(c => c.expires > this.now() && c.value.projectId === id && !ids.has(c.value.id)).map(c => c.value), ...list]; }
   append(id, value) { const old = this.get(id), ids = new Set(old.conversations.map(c => c.id)); this.entries.set(id, { conversations: [...old.conversations, ...value.conversations.filter(c => !ids.has(c.id))], nextCursor: value.nextCursor, loaded: true }); }
   refresh(force = false) {

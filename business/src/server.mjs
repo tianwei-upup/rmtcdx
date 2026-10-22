@@ -174,8 +174,8 @@ export async function createBusinessServer(options = {}) {
     res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     try {
       const url = new URL(req.url, origin), p = url.pathname, method = req.method;
-      if(queueScope && method==='GET' && (p==='/devices/mac/' || queueScope.mode==='project-readonly' && p==='/devices/mac-owner-inbox-test/' && !deviceScope('mac-owner-inbox-test'))){res.writeHead(302,{'location':`/devices/${queueScopes.find(g=>g.mode==='personal-projects')?.deviceId??queueScope.deviceId}/`,'content-type':'text/plain'});return res.end('Dedicated test queue');}
-      if (method === 'GET' && (['/', '/app.js', '/style.css', '/chat-state.mjs', '/markdown.mjs', '/business-client.mjs', '/queue-app.js', '/queue-state.mjs', '/queue-live.mjs','/catalog-live.mjs', '/desktop-live.mjs', '/desktop-history.mjs', '/desktop-merge.mjs', '/queue.css'].includes(p) || /^\/devices\/[A-Za-z0-9_-]+\/$/.test(p))) {
+      if(queueScope && method==='GET' && (p==='/devices/mac/' || queueScope.mode==='project-readonly' && p==='/devices/mac-owner-inbox-test/' && !deviceScope('mac-owner-inbox-test'))){res.writeHead(302,{'location':`/devices/${queueScopes.find(g=>g.mode==='personal-projects')?.deviceId??queueScope.deviceId}/${url.search}`,'content-type':'text/plain'});return res.end('Dedicated test queue');}
+      if (method === 'GET' && (['/', '/app.js', '/style.css', '/chat-state.mjs', '/markdown.mjs', '/business-client.mjs', '/theme.js', '/queue-app.js', '/queue-state.mjs', '/queue-live.mjs','/catalog-live.mjs', '/desktop-live.mjs', '/desktop-history.mjs', '/desktop-merge.mjs', '/queue.css'].includes(p) || /^\/devices\/[A-Za-z0-9_-]+\/$/.test(p))) {
         if (queueScope && p.startsWith('/devices/') && !deviceScope(p.split('/')[2])) fail('device_not_found', 404);
         const filename = p === '/' || p.startsWith('/devices/') ? queueScope ? 'queue.html' : 'index.html' : p.slice(1);
         const content = fs.readFileSync(path.resolve(here, '../dist', filename));

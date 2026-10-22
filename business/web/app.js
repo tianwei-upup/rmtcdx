@@ -5,8 +5,8 @@ const $ = id => document.getElementById(id), client = new BusinessClient();
 const cache = new Map(), drafts = new Map(), rows = new Map(), loadingSnapshots = new Map();
 let selected = null, source = null, viewRevision = 0;
 let deviceId = location.pathname.match(/^\/devices\/([\w-]+)/)?.[1] ?? 'mac', currentProject = '', deviceOnline = false;
-let stickyBottom = true, renderFrame = null, toastTimer, unknownKey = null;
-let projects = [];
+let stickyBottom = true, renderFrame = null, toastTimer, unknownKey = null, composerOffsetFrame = null;
+let projects = [], showArchived = false;
 const projectPins = new ProjectPins(localStorage);
 const directory = new DirectoryCache(() => client.job('/api/devices/' + deviceId + '/sync', { resource: 'directory' }));
 const expandedProjects = new Set(), visibleCounts = new Map();
@@ -25,6 +25,37 @@ function failure(error, action = 'action') {
 }
 const action = fn => async event => { try { await fn(event); } catch (error) { failure(error); } };
 function scopeKey() { return deviceId + ':' + currentProject; }
+function relativeTime(seconds) {
+  if (!seconds) return '';
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - seconds);
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+  if (diff < 2592000) return Math.floor(diff / 86400) + ' 天前';
+  return new Date(seconds * 1000).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+}
+function sessionMeta(conversation) {
+  const parts = [], when = relativeTime(conversation.updatedAt);
+  if (when) parts.push(when);
+  if (conversation.archived) parts.push('已归档');
+  if (conversation.status === 'running') parts.push('进行中');
+  return parts.join(' · ');
+}
+function latestActivity(projectId) {
+  let latest = 0;
+  for (const conversation of directory.conversations(projectId)) if ((conversation.updatedAt ?? 0) > latest) latest = conversation.updatedAt;
+  return latest;
+}
+function orderedProjects(pins) {
+  const base = projectPins.order(projects, deviceId);
+  const rest = base.filter(project => !pins.includes(project.id))
+    .sort((a, b) => latestActivity(b.id) - latestActivity(a.id) || a.name.localeCompare(b.name));
+  return [...base.filter(project => pins.includes(project.id)), ...rest];
+}
+function visibleConversations(projectId) {
+  const list = directory.conversations(projectId).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+  return showArchived ? list : list.filter(conversation => conversation.archived !== true);
+}
 function conversationKey(id) { return deviceId + ':' + id; }
 function rememberSelection() { localStorage.setItem('rmt-last:' + scopeKey(), selected?.id ?? ''); }
 function stateFor(id, title) {
@@ -34,7 +65,16 @@ function stateFor(id, title) {
 }
 function blank() { const key = scopeKey(); if (!drafts.has(key) || drafts.get(key).id || drafts.get(key).sending) drafts.set(key, new ConversationState(null)); drafts.get(key).projectId = currentProject; return drafts.get(key); }
 function saveDraft() { if (selected) selected.draft = $('text').value; }
-function autosize() { $('text').style.height = 'auto'; $('text').style.height = Math.min($('text').scrollHeight, 170) + 'px'; }
+function autosize() { $('text').style.height = 'auto'; $('text').style.height = Math.min($('text').scrollHeight, 170) + 'px'; scheduleComposerOffset(); }
+function composerOffset() {
+  const footer = document.querySelector('.composer-footer');
+  if (!footer) return;
+  document.documentElement.style.setProperty('--composer-offset', Math.round(footer.getBoundingClientRect().height + 14) + 'px');
+}
+function scheduleComposerOffset() {
+  if (composerOffsetFrame) return;
+  composerOffsetFrame = requestAnimationFrame(() => { composerOffsetFrame = null; composerOffset(); });
+}
 function syncControls() {
   const running = Boolean(selected?.turnId) && ['running', 'approval'].includes(selected?.status), submitting = Boolean(selected?.sending);
   $('send').hidden = running; $('interrupt').hidden = !running;
@@ -123,18 +163,18 @@ function chooseProject(id) {
 }
 function renderCatalog() {
   const query = $('search').value.trim().toLocaleLowerCase(), pins = projectPins.read(deviceId);
-  const ordered = projectPins.order(projects, deviceId);
-  const signature = JSON.stringify([query, pins, [...expandedProjects], [...visibleCounts], currentProject, selected?.id, ordered.map(p => [p, directory.get(p.id).loaded, directory.get(p.id).nextCursor, directory.conversations(p.id)])]);
+  const ordered = orderedProjects(pins);
+  const signature = JSON.stringify([query, pins, showArchived, [...expandedProjects], [...visibleCounts], currentProject, selected?.id, ordered.map(p => [p, directory.get(p.id).loaded, directory.get(p.id).nextCursor, directory.conversations(p.id)])]);
   if (signature === treeSignature) return; treeSignature = signature;
   const scroll = $('directoryScroll'), top = scroll.scrollTop, focusKey = document.activeElement?.dataset.focusKey;
   const fragment = document.createDocumentFragment(); let section = '', visible = 0;
   for (const project of ordered) {
-    const entry = directory.get(project.id), conversations = directory.conversations(project.id);
+    const entry = directory.get(project.id), conversations = visibleConversations(project.id);
     const projectMatch = project.name.toLocaleLowerCase().includes(query);
     const matches = query && !projectMatch ? conversations.filter(c => c.title.toLocaleLowerCase().includes(query)) : conversations;
     if (query && !projectMatch && !matches.length) continue;
     visible++;
-    const groupName = pins.includes(project.id) ? '已置顶' : '项目';
+    const groupName = pins.includes(project.id) ? '已置顶' : query ? '项目' : '最近更新';
     if (section !== groupName) { const label = document.createElement('p'); label.className = 'section-label'; label.textContent = groupName; fragment.append(label); section = groupName; }
     const group = document.createElement('section'); group.className = 'project-group'; group.dataset.projectId = project.id;
     const row = document.createElement('div'); row.className = 'project-row'; row.dataset.projectId = project.id;
@@ -152,7 +192,12 @@ function renderCatalog() {
     const list = document.createElement('div'); list.className = 'project-sessions'; list.hidden = !expanded;
     const limit = query ? matches.length : (visibleCounts.get(project.id) ?? 8);
     for (const conversation of matches.slice(0, limit)) {
-      const button = document.createElement('button'); button.type = 'button'; button.className = 'session-row'; button.textContent = conversation.title || '新聊天'; button.dataset.id = conversation.id; button.dataset.projectId = project.id; button.dataset.focusKey = 'session:' + conversation.id; button.setAttribute('aria-current', String(selected?.id === conversation.id));
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'session-row';
+      const label = document.createElement('span'); label.className = 'session-title'; label.textContent = conversation.title || '新聊天';
+      button.append(label);
+      const meta = sessionMeta(conversation);
+      if (meta) { const detail = document.createElement('span'); detail.className = 'session-meta'; detail.textContent = meta; button.append(detail); }
+      button.dataset.id = conversation.id; button.dataset.projectId = project.id; button.dataset.focusKey = 'session:' + conversation.id; button.setAttribute('aria-current', String(selected?.id === conversation.id));
       button.onclick = action(() => selectConversation(conversation.id, conversation.title, project.id)); list.append(button);
     }
     if (!matches.length) { const empty = document.createElement('p'); empty.className = 'project-empty'; empty.textContent = entry.loaded ? '暂无会话' : '正在后台同步…'; list.append(empty); }
@@ -249,9 +294,10 @@ $('refreshProjects').onclick = action(async () => { await refreshDirectory(true)
 $('new').onclick = $('drawerNew').onclick = newChat;
 $('dismissNotice').onclick = () => notice('');
 $('search').oninput = renderCatalog;
+$('toggleArchived').onclick = () => { showArchived = !showArchived; treeSignature = ''; $('toggleArchived').textContent = showArchived ? '隐藏归档会话' : '显示归档会话'; renderCatalog(); };
 $('moreMessages').onclick = action(async () => { const state = selected; $('moreMessages').disabled = true; try { await hydrate(state, true); } finally { $('moreMessages').disabled = false; } });
 $('project').onchange = () => { chooseProject($('project').value); expandedProjects.add(currentProject); renderCatalog(); openPanel($('drawer')); };
-$('device').onchange = () => { saveDraft(); location.assign('/devices/' + encodeURIComponent($('device').value) + '/'); };
+$('device').onchange = () => { saveDraft(); const forced = new URLSearchParams(location.search).get('theme'); location.assign('/devices/' + encodeURIComponent($('device').value) + '/' + (forced ? '?theme=' + encodeURIComponent(forced) : '')); };
 $('refresh').onclick = action(async () => { closePanel($('settings')); if (selected?.id) { await hydrate(selected); toast('会话已更新'); } else await init(); });
 $('reviewRefresh').onclick = action(async () => { if (selected?.id) { await hydrate(selected); toast('已读取最新会话，请核对后确认'); } else { await loadCatalog(); openPanel($('drawer')); } });
 $('resolveUnknown').onclick = () => { if (!$('reviewed').checked) { toast('请先刷新会话并核对实际结果'); return; } if (unknownKey) sessionStorage.removeItem(unknownKey); else if (selected?.id) client.clear('/api/conversations/' + selected.id + '/turns'); unknownKey = null; $('review').hidden = true; if (selected) { selected.sending = false; if (selected.status === 'unknown') selected.status = 'idle'; } syncControls(); toast('已结束待核对状态，下次发送将创建新请求'); };
@@ -296,9 +342,18 @@ $('composer').onsubmit = async event => {
 $('interrupt').onclick = action(async () => { const state = selected; if (!state?.id || !state.turnId) return; $('interrupt').disabled = true; try { await client.job('/api/conversations/' + state.id + '/interrupt', { turnId: state.turnId }, { writing: true }); toast('已请求停止'); } finally { $('interrupt').disabled = false; } });
 $('chatScroll').addEventListener('scroll', () => { stickyBottom = nearBottom($('chatScroll').scrollTop, $('chatScroll').scrollHeight, $('chatScroll').clientHeight); $('jumpBottom').hidden = stickyBottom; }, { passive: true });
 $('jumpBottom').onclick = () => { stickyBottom = true; bottom(true); };
-function theme(value) { if (value === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = value; localStorage.setItem('rmt-theme', value); $('theme').value = value; }
-theme(localStorage.getItem('rmt-theme') || 'system'); $('theme').onchange = () => theme($('theme').value);
-function viewport() { document.documentElement.style.setProperty('--app-height', (window.visualViewport?.height ?? window.innerHeight) + 'px'); if (stickyBottom) requestAnimationFrame(() => bottom()); }
+function theme() {
+  // The native shell paints the system bars from the system theme, so the page
+  // follows the same source. A manual override would leave the two disagreeing.
+  // The native shell sends that theme as a query parameter because a fixed
+  // light app theme keeps the WebView on prefers-color-scheme: light.
+  const forced = new URLSearchParams(location.search).get('theme');
+  if (forced === 'dark' || forced === 'light') document.documentElement.dataset.theme = forced;
+  else delete document.documentElement.dataset.theme;
+  try { localStorage.removeItem('rmt-theme'); } catch { }
+}
+theme();
+function viewport() { document.documentElement.style.setProperty('--app-height', (window.visualViewport?.height ?? window.innerHeight) + 'px'); scheduleComposerOffset(); if (stickyBottom) requestAnimationFrame(() => bottom()); }
 window.visualViewport?.addEventListener('resize', viewport); window.addEventListener('resize', viewport); viewport();
 let pointer;
 document.addEventListener('pointerdown', event => { pointer = { x: event.clientX, y: event.clientY }; }, { passive: true });

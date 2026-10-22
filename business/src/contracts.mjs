@@ -38,10 +38,11 @@ function page(value) {
   if (value.cursor != null) string(value.cursor, 1000);
 }
 function conversation(value) {
-  object(value, ['id', 'projectId', 'title', 'status', 'updatedAt'], ['id', 'projectId', 'title', 'status']);
+  object(value, ['id', 'projectId', 'title', 'status', 'updatedAt', 'archived'], ['id', 'projectId', 'title', 'status']);
   identifier(value.id); identifier(value.projectId); string(value.title, 200, 0);
   if (!['idle', 'running', 'completed', 'failed', 'interrupted'].includes(value.status)) fail('invalid_conversation_status');
   if (value.updatedAt !== undefined && (!Number.isSafeInteger(value.updatedAt) || value.updatedAt < 0)) fail('invalid_timestamp');
+  if (value.archived !== undefined && typeof value.archived !== 'boolean') fail('invalid_fields');
 }
 export function input(operation, value) {
   if (QUEUE_OPERATIONS.includes(operation)) {

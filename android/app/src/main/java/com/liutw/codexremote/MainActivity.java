@@ -67,6 +67,7 @@ public class MainActivity extends Activity {
             diagnosticScript = script.toString(StandardCharsets.UTF_8.name());
         } catch (IOException error) { logs.record("App", "diagnostics.error", DiagnosticLog.data("error", "IOException")); }
         migrateWindowsDefault();
+        applyPersonalDefaults();
         active = preferences.getInt("active", 0) == 1 ? 1 : 0;
         boolean dark = (getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
             == android.content.res.Configuration.UI_MODE_NIGHT_YES;
@@ -86,11 +87,13 @@ public class MainActivity extends Activity {
         root.addView(progress, new FrameLayout.LayoutParams(-1, dp(2), android.view.Gravity.TOP));
         Button menu = button("⋮", this::showMore);
         menu.setTextSize(25);
-        menu.setTextColor(Color.rgb(117, 117, 117));
+        // The page owns the top bar; the native button must share its background
+        // so a dark theme does not show a white disc floating over the page.
+        menu.setTextColor(dark ? Color.rgb(170, 170, 170) : Color.rgb(117, 117, 117));
         menu.setContentDescription("更多选项");
         menu.setPadding(0, 0, 0, dp(3));
         android.graphics.drawable.GradientDrawable circle = new android.graphics.drawable.GradientDrawable();
-        circle.setColor(Color.WHITE);
+        circle.setColor(background);
         circle.setCornerRadius(dp(22));
         menu.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x20757575), null, circle));
         menu.setStateListAnimator(null);
@@ -116,6 +119,15 @@ public class MainActivity extends Activity {
         return preferences.getString("url_" + index, index == 0 ? BuildConfig.DEFAULT_WINDOWS_URL : "");
     }
 
+    // The app theme is a fixed light theme, so the WebView reports
+    // prefers-color-scheme: light even when the system is dark. Pass the native
+    // theme to the page so the page and the system bars never disagree.
+    private String themedUrl(String address) {
+        boolean dark = (getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+            == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        return address + (address.contains("?") ? "&" : "?") + "theme=" + (dark ? "dark" : "light");
+    }
+
     private void migrateWindowsDefault() {
         if (preferences.getBoolean("windows_default_migrated", false)) return;
         String previous = preferences.getString("url_0", "");
@@ -126,6 +138,16 @@ public class MainActivity extends Activity {
             update.remove("url_0");
         }
         update.apply();
+    }
+
+    private void applyPersonalDefaults() {
+        if (preferences.contains("cloud_url") || !BuildConfig.DEFAULT_WINDOWS_URL.isEmpty()
+                || !preferences.getString("url_0", "").isEmpty()
+                || !preferences.getString("url_1", "").isEmpty()
+                || BuildConfig.DEFAULT_CLOUD_URL.isEmpty()) return;
+        preferences.edit().putString("cloud_url", BuildConfig.DEFAULT_CLOUD_URL)
+            .putInt("active", 1).apply();
+        logs.record("App", "connection.default", DiagnosticLog.data("url", BuildConfig.DEFAULT_CLOUD_URL, "host", "Mac"));
     }
 
     private void switchHost(int index) {
@@ -151,7 +173,7 @@ public class MainActivity extends Activity {
         content.addView(page, new FrameLayout.LayoutParams(-1, -1));
         page.onResume();
         status.setText(NAMES[active] + " · " + address);
-        if (fresh) page.loadUrl(address);
+        if (fresh) page.loadUrl(themedUrl(address));
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -399,7 +421,7 @@ public class MainActivity extends Activity {
     }
     private void showHelp() {
         new AlertDialog.Builder(this).setTitle("连接电脑上的 Codex")
-            .setMessage("在「配置 → 统一云端地址」填写云端 HTTPS 地址并登录。两台电脑分别以 windows、mac 设备标识连接同一云端。\n\n电脑需要保持开机联网。切换主机与从后台返回不会主动刷新，必要时点击「刷新」。\n\n直连方式仍可在「配置」中选择。127.0.0.1 指向手机自身，仅在电脑通过 USB 设置 adb reverse 后可用于旧版本机回归。业务服务验证无需 USB 映射。")
+            .setMessage("已保存或内置的地址会自动连接，无需重复配置。自用版首次安装默认连接 ECS 并打开 Mac，首次使用登录即可；更换服务器可进入「配置」。\n\n电脑需要保持开机联网。切换主机与从后台返回不会主动刷新，必要时点击「刷新」。\n\n直连方式仍可在「配置」中选择。127.0.0.1 指向手机自身，仅在电脑通过 USB 设置 adb reverse 后可用于旧版本机回归。业务服务验证无需 USB 映射。")
             .setPositiveButton("确定", null).show();
     }
 

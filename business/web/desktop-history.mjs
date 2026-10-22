@@ -13,7 +13,7 @@ export function mountDesktopHistory({host,route,api,onUpdate=()=>{},onError=()=>
   const list=mergeDesktopQueue(state.list(),receipts);itemCount=list.length;
   for(const [index,item]of list.entries()){
    if(item.kind==='queue'&&queueRow){const root=queueRow(item.receipt);root.dataset.mergedIntent=item.receipt.intentId;root.dataset.queueCorrelated=String(item.correlated===true);root.dataset.turnId=item.turnId??'';if(transcript.children[index]!==root)transcript.insertBefore(root,transcript.children[index]??null);continue;}
-   let row=rows.get(item.id);if(!row){const root=document.createElement('article');root.className='message';root.dataset.nativeId=item.id;const body=document.createElement('div');body.className='message-content';const actions=document.createElement('div');actions.className='message-actions';const copy=document.createElement('button');copy.className='text-button';copy.textContent='复制';copy.type='button';actions.append(copy);root.append(body,actions);row={root,body,actions,copy,text:null};copy.onclick=()=>void copyText(row.text??'',copy);rows.set(item.id,row);}
+   let row=rows.get(item.id);if(!row){const root=document.createElement('article');root.className='message';root.dataset.nativeId=item.id;const body=document.createElement('div');body.className='message-content';const actions=document.createElement('div');actions.className='message-actions';const copy=document.createElement('button');copy.className='icon-button';copy.type='button';copy.setAttribute('aria-label','复制');const copyIcon=document.createElement('img');copyIcon.src='/icons/copy.svg';copyIcon.alt='';copy.append(copyIcon);actions.append(copy);root.append(body,actions);row={root,body,actions,copy,text:null};copy.onclick=()=>void copyText(row.text??'',copy);rows.set(item.id,row);}
    row.root.className='message '+(item.kind==='user'?'user':item.kind==='tool'?'desktop-tool':'assistant');row.root.dataset.status=item.status;row.root.dataset.kind=item.kind;row.root.dataset.turnId=item.turnId;row.root.dataset.toolType=item.type??'';
    const signature=JSON.stringify(item);if(row.signature!==signature){row.signature=signature;
     if(item.kind==='tool'){
@@ -21,7 +21,7 @@ export function mountDesktopHistory({host,route,api,onUpdate=()=>{},onError=()=>
      if(!row.details){row.details=document.createElement('details');row.summary=document.createElement('summary');row.pre=document.createElement('pre');row.details.append(row.summary,row.pre);row.body.replaceChildren(row.details);}
      const labels={running:'执行中',inProgress:'执行中',completed:'已完成',failed:'失败',declined:'已拒绝'};row.summary.textContent=item.title+' · '+(labels[item.status]??item.status);row.text=[item.detail,item.output,item.error].filter(Boolean).join('\n\n');row.pre.textContent=row.text;
     }else{row.text=item.text;if(row.bodyText!==item.text){row.body.replaceChildren(item.kind==='user'?document.createTextNode(item.text):markdown(item.text));row.bodyText=item.text;}row.body.classList.toggle('native-streaming',item.status==='running');}
-    row.actions.hidden=!row.text;
+    row.actions.hidden=!row.text||item.status==='running';
    }
    if(transcript.children[index]!==row.root)transcript.insertBefore(row.root,transcript.children[index]??null);
   }

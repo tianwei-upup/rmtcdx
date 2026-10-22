@@ -5,7 +5,12 @@ import { QueueState } from './queue-state.mjs';
 import { markdown, copyText } from './markdown.mjs';
 const $=id=>document.getElementById(id),client=new BusinessClient({storage:localStorage});
 let state=new QueueState(),config,rootConfig,catalog=[],projectId,selectionVersion=0,route,polling=false,busy=false,timer,selected,live,liveAvailable=false,liveConnected=false,follow=true,desktopHistory=null,catalogLive;
-let projectPickerOpen=false;
+let projectPickerOpen=false,composerOffsetFrame=null;
+const RECENT_PROJECTS='rmt-recent-projects',RECENT_CHATS='rmt-recent-chats';
+const readRecent=key=>{try{const value=JSON.parse(localStorage.getItem(key)||'[]');return Array.isArray(value)?value.filter(x=>x&&typeof x.id==='string'&&Number.isFinite(x.at)):[];}catch{return[];}};
+const touchRecent=(key,id)=>{if(!id)return;try{const list=readRecent(key).filter(x=>x.id!==id);list.unshift({id,at:Date.now()});localStorage.setItem(key,JSON.stringify(list.slice(0,8)));}catch{}};
+const recentAt=(key,id)=>readRecent(key).find(x=>x.id===id)?.at??0;
+function relativeTime(at){if(!at)return'';const diff=Date.now()-at;if(diff<60000)return'刚刚';if(diff<3600000)return Math.floor(diff/60000)+' 分钟前';if(diff<86400000)return Math.floor(diff/3600000)+' 小时前';if(diff<2592000000)return Math.floor(diff/86400000)+' 天前';return new Date(at).toLocaleDateString('zh-CN',{month:'numeric',day:'numeric'});}
 const traces=new Map(),states=new Map(),drafts=new Map(),rows=new Map();
 const normalChats=p=>(p?.conversations??[]).filter(c=>!c.archived);
 const allChats=()=>catalog.flatMap(p=>p.conversations.map(c=>({...c,projectId:p.id,workspaceAvailable:c.workspaceAvailable??p.available})));
@@ -45,9 +50,9 @@ function controls(){
   const c=state.consumer,active=c?.state==='active';$('consumerStatus').dataset.state=c?.state??'closed';
   $('consumerStatus').textContent=!state.online?'电脑暂时离线，等待重新连接':active?'手机接收已开启':c?.state==='stopping'?'正在暂停手机接收':autoReceive?'发送后自动接入原会话':'消息会先排队，接收后开始处理';
   $('stopConsumer').hidden=!active;$('stopConsumer').disabled=!state.online||busy;
-  $('connection').dataset.state=state.online&&liveConnected?'ready':'waiting';$('connection').textContent=!state.online?'连接中':liveConnected?'已同步':'同步中';
+  $('connection').dataset.state=state.online&&liveConnected?'ready':'waiting';$('connection').textContent=!state.online?'连接中':liveConnected?'已同步':'同步中';$('connection').title=!state.online?'正在连接电脑':liveConnected?'实时队列已同步':'正在同步最新状态';
   $('composerContext').textContent=archived?'已归档 · 仅查看':!state.online?'等待连接电脑':!active?'等待电脑接收':config.executionMode==='desktop'?'桌面权限':'只读对话';
-  if(desktopEnabled()){$('connection').dataset.state=desktopHistory?.available?'ready':'waiting';$('connection').textContent=desktopHistory?.available?(desktopHistory?.capabilities?.historySnapshot?'历史已同步':'已同步'):'连接中';$('composerContext').textContent=archived?'已归档 · 仅查看':desktopHistory?.pendingCount?'有审批等待处理，请查看最新消息':desktopHistory?.available?(config.queueWrites===false?'桌面实时同步 · 仅查看':active?(config.executionMode==='desktop'?'桌面权限 · 手机接收已开启':'桌面实时同步 · 手机接收已开启'):autoReceive?'历史已同步 · 可直接发送':'历史已同步 · 消息将排队'):autoReceive?'发送后接入原会话 · 历史同步中':'等待桌面同步';}
+  if(desktopEnabled()){$('connection').dataset.state=desktopHistory?.available?'ready':'waiting';$('connection').textContent=desktopHistory?.available?'已同步':'连接中';$('connection').title=desktopHistory?.available?(desktopHistory?.capabilities?.historySnapshot?'桌面历史已同步':'桌面实时同步中'):'正在连接桌面';$('composerContext').textContent=archived?'已归档 · 仅查看':desktopHistory?.pendingCount?'有审批等待处理，请查看最新消息':desktopHistory?.available?(config.queueWrites===false?'桌面实时同步 · 仅查看':active?(config.executionMode==='desktop'?'桌面权限 · 手机接收已开启':'桌面实时同步 · 手机接收已开启'):autoReceive?'历史已同步 · 可直接发送':'历史已同步 · 消息将排队'):autoReceive?'发送后接入原会话 · 历史同步中':'等待桌面同步';}
   for(const row of rows.values()){row.cancel.disabled=busy||!state.online;row.retry.disabled=busy||!state.online||Boolean(pending);}
 }
 function createRow(id){
@@ -80,19 +85,29 @@ function render(){
   controls();observed();requestAnimationFrame(()=>{if(follow)$('chatScroll').scrollTop=$('chatScroll').scrollHeight;updateJump();});
 }
 function updateJump(){const scroll=$('chatScroll');$('jumpBottom').hidden=scroll.scrollHeight-scroll.clientHeight-scroll.scrollTop<100;}
-function resizeInput(){const input=$('text');input.style.height='auto';input.style.height=Math.min(input.scrollHeight,170)+'px';controls();}
+function resizeInput(){const input=$('text');input.style.height='auto';input.style.height=Math.min(input.scrollHeight,170)+'px';scheduleComposerOffset();controls();}
+function composerOffset(){const footer=document.querySelector('.composer-footer');if(!footer)return;document.documentElement.style.setProperty('--composer-offset',Math.round(footer.getBoundingClientRect().height+14)+'px');}
+function scheduleComposerOffset(){if(composerOffsetFrame)return;composerOffsetFrame=requestAnimationFrame(()=>{composerOffsetFrame=null;composerOffset();});}
 function renderChats(){
   const query=$('search').value.trim().toLocaleLowerCase(),chats=normalChats(catalog.find(p=>p.id===projectId));
   if($('projectSelect')){$('projectSelect').replaceChildren(...catalog.map(p=>{const o=document.createElement('option');o.value=p.id;o.textContent=p.name+'（'+normalChats(p).length+'）';return o;}));$('projectSelect').value=projectId;}
   renderProjectPicker();
-  const buttons=chats.filter(c=>c.title.toLocaleLowerCase().includes(query)).map(c=>{const b=document.createElement('button');b.type='button';b.className='session-row';b.dataset.chatId=c.id;b.setAttribute('aria-current',String(c.id===selected));b.disabled=busy;const title=document.createElement('span');title.className='session-title';title.textContent=c.title;b.append(title);b.onclick=()=>{if(!busy){selectChat(c.id);$('drawer').close();}};return b;});$('chatList').replaceChildren(...buttons);$('noChats').hidden=buttons.length>0;$('noChats').textContent=query?'没有找到匹配的会话':'当前项目暂无未归档会话';
+  const buttons=chats.filter(c=>c.title.toLocaleLowerCase().includes(query)).sort((a,b)=>recentAt(RECENT_CHATS,b.id)-recentAt(RECENT_CHATS,a.id)).map(c=>{const b=document.createElement('button');b.type='button';b.className='session-row';b.dataset.chatId=c.id;b.setAttribute('aria-current',String(c.id===selected));b.disabled=busy;const title=document.createElement('span');title.className='session-title';title.textContent=c.title;b.append(title);const when=relativeTime(recentAt(RECENT_CHATS,c.id));if(when){const meta=document.createElement('span');meta.className='session-meta';meta.textContent=when;b.append(meta);}b.onclick=()=>{if(!busy){selectChat(c.id);$('drawer').close();}};return b;});$('chatList').replaceChildren(...buttons);$('noChats').hidden=buttons.length>0;$('noChats').textContent=query?'没有找到匹配的会话':'当前项目暂无未归档会话';
 }
 function renderProjectPicker(){
   if(!$('projectToggle'))return;const current=catalog.find(p=>p.id===projectId);
   $('currentProjectName').textContent=current?.name??'选择项目';$('currentProjectCount').textContent=normalChats(current).length+' 个会话';$('projectToggle').setAttribute('aria-label','当前项目：'+(current?.name??'未选择')+'，切换项目');
   if(!projectPickerOpen)return;const query=$('projectSearch').value.trim().toLocaleLowerCase(),projects=catalog.filter(p=>p.name.toLocaleLowerCase().includes(query)),list=$('projectList'),scroll=list.scrollTop,focused=document.activeElement?.closest('.project-option')?.dataset.projectId;
-  list.replaceChildren(...projects.map(p=>{const row=$('projectOptionTemplate').content.firstElementChild.cloneNode(true);row.dataset.projectId=p.id;row.setAttribute('aria-current',String(p.id===projectId));row.disabled=busy;row.querySelector('.project-option-name').textContent=p.name;row.querySelector('.project-option-meta').textContent=normalChats(p).length+' 个会话'+(p.available===false?' · 目录不可用':'');row.onclick=()=>chooseProject(p.id);return row;}));
-  list.hidden=projects.length===0;list.scrollTop=scroll;if(focused)[...list.children].find(row=>row.dataset.projectId===focused)?.focus({preventScroll:true});$('projectMatches').textContent=projects.length+' 个';$('noProjects').hidden=projects.length>0;
+  const recent=query?[]:readRecent(RECENT_PROJECTS).map(r=>projects.find(p=>p.id===r.id)).filter(Boolean).slice(0,3);
+  const recentIds=new Set(recent.map(p=>p.id));
+  const rest=projects.filter(p=>!recentIds.has(p.id)).sort((a,b)=>a.name.localeCompare(b.name));
+  const option=p=>{const row=$('projectOptionTemplate').content.firstElementChild.cloneNode(true);row.dataset.projectId=p.id;row.setAttribute('aria-current',String(p.id===projectId));row.disabled=busy;row.querySelector('.project-option-name').textContent=p.name;row.querySelector('.project-option-meta').textContent=normalChats(p).length+' 个会话'+(p.available===false?' · 目录不可用':'');row.onclick=()=>chooseProject(p.id);return row;};
+  const group=(label,rows)=>{const head=document.createElement('p');head.className='project-group-label';head.textContent=label;const wrap=document.createDocumentFragment();wrap.append(head);for(const p of rows)wrap.append(option(p));return wrap;};
+  const fragment=document.createDocumentFragment();
+  if(recent.length)fragment.append(group('最近使用',recent));
+  if(rest.length)fragment.append(group(query?'搜索结果':'全部项目',rest));
+  list.replaceChildren(fragment);
+  list.hidden=projects.length===0;list.scrollTop=scroll;if(focused)[...list.querySelectorAll('.project-option')].find(row=>row.dataset.projectId===focused)?.focus({preventScroll:true});$('projectMatches').textContent=projects.length+' 个';$('noProjects').hidden=projects.length>0;
 }
 function setProjectPicker(open){
   if(!$('projectPanel'))return;projectPickerOpen=open;$('drawer').dataset.projectPicker=open?'open':'closed';$('projectPanel').hidden=!open;$('projectToggle').setAttribute('aria-expanded',String(open));
@@ -149,7 +164,7 @@ async function selectChat(id){
  catch(e){if(version===selectionVersion)failure(e);}
 }
 function activateChat(id){
-  if(route)drafts.set(selected,$('text').value);projectId=allChats().find(c=>c.id===id)?.projectId??projectId;$('projectName').textContent=$('drawerProject').textContent=catalog.find(p=>p.id===projectId)?.name??'所有项目';desktopHistory?.close();desktopHistory=null;live?.close();liveAvailable=false;liveConnected=false;selected=id;route=id?'/api/conversations/'+id+'/queue':null;state=states.get(id)??new QueueState();states.set(id,state);state.online=false;
+  if(route)drafts.set(selected,$('text').value);projectId=allChats().find(c=>c.id===id)?.projectId??projectId;touchRecent(RECENT_PROJECTS,projectId);touchRecent(RECENT_CHATS,id);$('projectName').textContent=$('drawerProject').textContent=catalog.find(p=>p.id===projectId)?.name??'所有项目';desktopHistory?.close();desktopHistory=null;live?.close();liveAvailable=false;liveConnected=false;selected=id;route=id?'/api/conversations/'+id+'/queue':null;state=states.get(id)??new QueueState();states.set(id,state);state.online=false;
   rows.clear();$('queue').replaceChildren();follow=true;$('text').value=drafts.get(id)??'';notice();$('pageTitle').textContent=chat()?.title??(id?'专用测试会话':'暂无会话');$('context').setAttribute('aria-label','当前会话：'+$('pageTitle').textContent+'，项目：'+projectName()+'，切换会话');$('composerLabel').textContent='发送到：'+$('pageTitle').textContent;resizeInput();
   try{if(id)localStorage.setItem('rmt-queue-selected:'+rootConfig.deviceId,id);}catch{}render();if(!id)return;const targetState=state,targetRoute=route;
   if(config.realtime)live=new QueueLive({route,api:(...args)=>client.api(...args),onUpdate:value=>{if(route!==targetRoute||state!==targetState)return;liveAvailable=true;state.online=value.fresh!==false;state.merge(value.receipts);for(const r of value.receipts){const t=traces.get(r.intentId);if(t)t.transport=value.transport;}state.consumer=value.consumer;reconcile();render();},onHealth:value=>{if(route!==targetRoute)return;if(value.available!==undefined)liveAvailable=Boolean(value.available);if(value.connected!==undefined)liveConnected=value.connected;if(value.fresh!==undefined)state.online=Boolean(value.available&&value.fresh);controls();},onError:error=>{if(route!==targetRoute)return;if(error.status===401)failure(error);else if(!['projection_unavailable','network_unavailable'].includes(error.code))failure(error);}}).start();void refresh();
