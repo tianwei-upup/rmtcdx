@@ -5,7 +5,9 @@ import crypto from 'node:crypto';
 
 // Read only the desktop's project metadata. Never write its ordering or pins.
 export function desktopProjects(file = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), '.codex-global-state.json'), extras = []) {
-  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  return desktopProjectsFromState(JSON.parse(fs.readFileSync(file, 'utf8')), extras);
+}
+export function desktopProjectsFromState(state, extras = []) {
   const records = state['local-projects'] ?? {};
   if (typeof records !== 'object' || Array.isArray(records)) throw new Error('desktop_projects_unavailable');
   const order = [...new Set([...(state['project-order'] ?? []), ...Object.keys(records)])];

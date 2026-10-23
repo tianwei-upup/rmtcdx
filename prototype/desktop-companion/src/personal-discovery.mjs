@@ -2,16 +2,26 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {DatabaseSync} from 'node:sqlite';
-import {desktopProjects} from '../../../business/src/projects.mjs';
+import {desktopProjectsFromState} from '../../../business/src/projects.mjs';
 
 const metadataSignature=s=>JSON.stringify([s['local-projects'],s['thread-project-assignments'],s['app-server-project-id-by-legacy-project-id-by-host'],s['thread-titles']]);
+// The desktop file also carries unrelated UI state and can be several MiB.
+// Reuse a parsed immutable source only while its exact file generation matches;
+// SQLite/WAL changes still query fresh rows below. No TTL or persisted cache.
+const desktopSources=new Map();
+function desktopSource(file){
+ const stamp=()=>{const s=fs.statSync(file,{bigint:true});return [s.dev,s.ino,s.size,s.mtimeNs,s.ctimeNs].map(String).join(':');},before=stamp(),old=desktopSources.get(file);
+ if(old?.stamp===before)return old;
+ const raw=JSON.parse(fs.readFileSync(file,'utf8'));if(before!==stamp())throw Object.assign(Error('desktop_catalog_changing'),{code:'desktop_catalog_changing'});
+ const value={stamp:before,raw,signature:metadataSignature(raw)};desktopSources.set(file,value);while(desktopSources.size>2)desktopSources.delete(desktopSources.keys().next().value);return value;
+}
 export const contextBinding=c=>crypto.createHash('sha256').update(JSON.stringify([c.id,c.projectId,c.cwd])).digest('hex');
-export function discoverPersonal({manifest,desktopStateFile,metadataDatabase}){
- const before=fs.readFileSync(desktopStateFile,'utf8'),raw=JSON.parse(before);
+export function discoverPersonal({manifest,desktopStateFile,metadataDatabase,conversationId}){
+ const source=desktopSource(desktopStateFile),raw=source.raw;
  if(!raw['local-projects']||!raw['thread-project-assignments'])throw Error('desktop_catalog_unavailable');
- const projects=desktopProjects(desktopStateFile),db=new DatabaseSync(metadataDatabase,{readOnly:true});let rows,nativeProjects=[],roots=[];
- try{db.exec('BEGIN');const columns=new Set(db.prepare('PRAGMA table_info(threads)').all().map(c=>c.name));rows=new Map(db.prepare('SELECT id,cwd,archived,title'+(columns.has('name')?',name':'')+(columns.has('project_id')?',project_id':'')+(columns.has('updated_at_ms')?',updated_at_ms':'')+' FROM threads').all().map(c=>[c.id,c]));const tables=new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(t=>t.name));if(tables.has('projects')&&tables.has('project_roots')){nativeProjects=db.prepare('SELECT id,name,metadata FROM projects ORDER BY position,id').all();roots=db.prepare('SELECT project_id,path FROM project_roots ORDER BY position').all();}}finally{db.exec('ROLLBACK');db.close();}
- if(metadataSignature(JSON.parse(fs.readFileSync(desktopStateFile,'utf8')))!==metadataSignature(raw))throw Object.assign(Error('desktop_catalog_changing'),{code:'desktop_catalog_changing'});
+ const projects=desktopProjectsFromState(raw),db=new DatabaseSync(metadataDatabase,{readOnly:true});let rows,nativeProjects=[],roots=[];
+ try{db.exec('BEGIN');const columns=new Set(db.prepare('PRAGMA table_info(threads)').all().map(c=>c.name));rows=new Map(db.prepare('SELECT id,cwd,archived,title'+(columns.has('name')?',name':'')+(columns.has('project_id')?',project_id':'')+(columns.has('updated_at_ms')?',updated_at_ms':'')+' FROM threads'+(conversationId?' WHERE id=?':'')).all(...(conversationId?[conversationId]:[])).map(c=>[c.id,c]));const tables=new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(t=>t.name));if(tables.has('projects')&&tables.has('project_roots')){nativeProjects=db.prepare('SELECT id,name,metadata FROM projects ORDER BY position,id').all();roots=db.prepare('SELECT project_id,path FROM project_roots ORDER BY position').all();}}finally{db.exec('ROLLBACK');db.close();}
+ if(desktopSource(desktopStateFile).signature!==source.signature)throw Object.assign(Error('desktop_catalog_changing'),{code:'desktop_catalog_changing'});
  // Preserve existing public project IDs through the desktop's explicit migration
  // aliases. New native projects use their own ID; shared cwd never joins them.
  const aliases=raw['app-server-project-id-by-legacy-project-id-by-host']?.['local:'+path.dirname(metadataDatabase)]??{},legacyByNative=new Map(Object.entries(aliases).map(([old,id])=>[id,old])),nativeToPublic=new Map();

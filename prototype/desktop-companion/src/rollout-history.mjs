@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {zstdDecompressSync} from 'node:zlib';
+import {HistoryBase} from './history-base.mjs';
+import {mergeHistory} from './history-merge.mjs';
 
 const fail=code=>{throw Object.assign(Error(code),{code});};
 const parts=value=>typeof value==='string'?value:Array.isArray(value)?value.filter(p=>['text','Text','input_text','output_text'].includes(p.type)).map(p=>p.text??'').join('\n'):'';
@@ -42,8 +45,8 @@ function decodeRecords(records,{conversationId,cwd}){
  for(const r of records){const p=r.payload??{},canonical=canonicalTurns.has(p.turn_id??current),hasUsers=userTurns.has(current),hasAssistant=assistantTurns.has(current);
   if(r.type==='turn_context'&&p.turn_id){current=p.turn_id;turn(current,r.timestamp);continue;}
   if(r.type==='event_msg'){
-   if(p.type==='task_started'){for(const t of turns.values())if(t.status==='inProgress'&&t.turnId!==p.turn_id)t.status='interrupted';current=p.turn_id??current;turn(current,r.timestamp).status='inProgress';continue;}
-   if(p.type==='task_complete'||p.type==='turn_aborted'){const t=turn(p.turn_id??current,r.timestamp);t.status=p.type==='turn_aborted'?'interrupted':'completed';if(!canonical&&p.last_agent_message&&!t.items.some(i=>i.type==='agentMessage'&&i.phase==='final_answer'))add(t,{type:'agentMessage',id:'final:'+r.line,text:p.last_agent_message,phase:'final_answer'});continue;}
+   if(p.type==='task_started'){for(const t of turns.values())if(t.status==='inProgress'&&t.turnId!==p.turn_id)t.status='interrupted';current=p.turn_id??current;Object.assign(turn(current,r.timestamp),{status:'inProgress',completionObserved:false});continue;}
+   if(p.type==='task_complete'||p.type==='turn_aborted'){const t=turn(p.turn_id??current,r.timestamp);t.status=p.type==='turn_aborted'?'interrupted':'completed';t.completionObserved=true;if(!canonical&&p.last_agent_message&&!t.items.some(i=>i.type==='agentMessage'&&i.phase==='final_answer'))add(t,{type:'agentMessage',id:'final:'+r.line,text:p.last_agent_message,phase:'final_answer'});continue;}
    if(canonical&&p.type==='item_completed'){add(turn(p.turn_id??current,r.timestamp),nativeItem(p.item));continue;}
    if(!canonical&&p.type==='user_message')add(turn(current,r.timestamp),{type:'userMessage',id:'user:'+r.line,content:[{type:'text',text:p.message??''}],clientId:p.client_id});
    if(!canonical&&!hasAssistant&&p.type==='agent_message')add(turn(current,r.timestamp),{type:'agentMessage',id:'agent:'+r.line,text:p.message??'',phase:p.phase??'final_answer'});
@@ -55,7 +58,7 @@ function decodeRecords(records,{conversationId,cwd}){
   else if(['function_call','custom_tool_call'].includes(p.type)){const i={type:'functionCall',id:p.call_id??p.id??'call:'+r.line,name:p.name,arguments:p.arguments??p.input,status:'running'};calls.set(p.call_id,{t,i});add(t,i);}
   else if(['function_call_output','custom_tool_call_output'].includes(p.type)){const call=calls.get(p.call_id);if(call){call.i.output=parts(p.output)||printable(p.output);call.i.status='completed';}else add(t,{type:'functionCallOutput',id:p.call_id??'output:'+r.line,output:parts(p.output)||printable(p.output),status:'completed'});}
  }
- return{id:conversationId,cwd,turns:[...turns.values()].filter(t=>t.items.length),turnsPagination:{hasMore:false},requests:[]};
+ return{id:conversationId,cwd,turns:[...turns.values()].filter(t=>t.items.length),turnsPagination:{hasMore:Boolean(meta.history_base)},requests:[]};
 }
 
 const toolLimit=8192;
@@ -70,7 +73,7 @@ function compact(value,key=''){
 }
 function publicRecord(line,index){
  if(!line.trim())return null;let r;try{r=JSON.parse(line);}catch{fail('invalid_rollout_history');}const p=r.payload??{};
- if(r.type==='session_meta')return{type:r.type,payload:{id:p.id,session_id:p.session_id},line:index};
+ if(r.type==='session_meta')return{type:r.type,payload:{id:p.id,session_id:p.session_id,history_mode:p.history_mode,history_base:p.history_base},line:index};
  if(r.type==='turn_context')return{type:r.type,payload:{turn_id:p.turn_id},timestamp:r.timestamp,line:index};
  if(r.type==='event_msg'&&!['task_started','task_complete','turn_aborted','item_completed','user_message','agent_message'].includes(p.type))return null;
  if(r.type==='event_msg'&&p.type==='item_completed'&&['Reasoning','ContextCompaction'].includes(p.item?.type))return null;
@@ -80,24 +83,32 @@ function publicRecord(line,index){
 }
 function publicRecords(lines){return lines.flatMap((line,n)=>{try{const r=publicRecord(line,n);return r?[r]:[];}catch(e){if(n===lines.length-1)return[];throw e;}});}
 
+// Native compaction may rewrite a longer file in place. Size/inode alone do
+// not prove an append; compare the metadata record without caching its text.
+function headerDigest(fd){
+ const hash=crypto.createHash('sha256'),buffer=Buffer.alloc(65536);let position=0,n;
+ while((n=fs.readSync(fd,buffer,0,buffer.length,position))>0){const end=buffer.subarray(0,n).indexOf(10);hash.update(buffer.subarray(0,end<0?n:end));if(end>=0)break;position+=n;if(position>64*1024*1024)fail('rollout_record_too_large');}
+ return hash.digest('hex');
+}
 export class RolloutHistory {
- constructor(scope,{maxBytes=2*1024*1024*1024}={}){this.scope=scope;this.maxBytes=maxBytes;this.cache=new Map();}
+ constructor(scope,{maxBytes=2*1024*1024*1024}={}){this.scope=scope;this.maxBytes=maxBytes;this.cache=new Map();this.bases=new HistoryBase(fs.realpathSync(path.dirname(scope.metadataDatabase)));}
  read(id){
   const chat=this.scope.check(id),root=fs.realpathSync(path.dirname(this.scope.metadataDatabase)),base=chat.rollout_path;
   let file=base,compressed=false;if(!fs.existsSync(file)){file+='.zst';compressed=true;}
   const real=fs.realpathSync(file);if(![path.join(root,'sessions')+path.sep,path.join(root,'archived_sessions')+path.sep].some(prefix=>real.startsWith(prefix)))fail('unsafe_rollout_history');
   const st=fs.lstatSync(file);if(!st.isFile()||st.isSymbolicLink()||st.uid!==process.getuid()||st.size>this.maxBytes)fail('unsafe_rollout_history');
   const signature=[real,st.ino,st.size,st.mtimeMs,chat.archived,chat.cwd].join(':');
-  let cached=this.cache.get(id);if(cached?.signature!==signature){const previous=cached,append=!compressed&&previous?.real===real&&previous.ino===st.ino&&st.size>=previous.offset;const fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);let records;
-   try{if(compressed){const bytes=zstdDecompressSync(fs.readFileSync(fd),{maxOutputLength:512*1024*1024});records=publicRecords(bytes.toString('utf8').split('\n'));}
+  let cached=this.cache.get(id);if(cached?.signature!==signature){const previous=cached;let append=!compressed&&previous?.real===real&&previous.ino===st.ino&&st.size>=previous.offset;const fd=fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);let records,headerSignature;
+   try{if(!compressed){headerSignature=headerDigest(fd);append=append&&previous.headerSignature===headerSignature;}if(compressed){const bytes=zstdDecompressSync(fs.readFileSync(fd),{maxOutputLength:512*1024*1024});records=publicRecords(bytes.toString('utf8').split('\n'));}
    else{records=append?[...previous.records]:[];const buffer=Buffer.alloc(1024*1024);let pending=append?previous.tail:Buffer.alloc(0),line=append?previous.lines:0,n,position=append?previous.offset:0;
     while((n=fs.readSync(fd,buffer,0,buffer.length,position))>0){position+=n;pending=Buffer.concat([pending,buffer.subarray(0,n)]);let start=0,index;while((index=pending.indexOf(10,start))>=0){const record=publicRecord(pending.subarray(start,index).toString('utf8'),line++);if(record)records.push(record);start=index+1;}pending=Buffer.from(pending.subarray(start));if(pending.length>64*1024*1024)fail('rollout_record_too_large');}
     // Native appends can leave one incomplete trailing record.
     var offset=position,tail=pending,lines=line;
-   }}finally{fs.closeSync(fd);}let displayRecords=records;if(!compressed&&tail.length)try{const last=publicRecord(tail.toString('utf8'),lines);if(last)displayRecords=[...records,last];}catch{}const state=decodeRecords(displayRecords,{conversationId:id,cwd:chat.cwd});cached={signature,state,...(!compressed?{records,real,ino:st.ino,offset,tail,lines}:{})};this.cache.set(id,cached);}
+   }}finally{fs.closeSync(fd);}let displayRecords=records;if(!compressed&&tail.length)try{const last=publicRecord(tail.toString('utf8'),lines);if(last)displayRecords=[...records,last];}catch{}const state=decodeRecords(displayRecords,{conversationId:id,cwd:chat.cwd});cached={signature,state,historyBase:displayRecords.find(r=>r.type==='session_meta')?.payload?.history_base,...(!compressed?{records,real,ino:st.ino,offset,tail,lines,headerSignature}:{})};this.cache.set(id,cached);}
 
   // Only selected histories are cached; a shared catalog is not a history dump.
   while(this.cache.size>2)this.cache.delete(this.cache.keys().next().value);
+  if(cached.historyBase){const base=this.bases.read(id,cached.historyBase,chat.cwd);return{...cached,chat,signature:cached.signature+':'+base.signature,state:mergeHistory(base.state,cached.state)};}
   return{...cached,chat};
  }
 }

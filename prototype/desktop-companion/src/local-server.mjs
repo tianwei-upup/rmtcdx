@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
-export async function serveLocal(runtime, service, shutdown) {
+export async function serveLocal(runtime, service, shutdown, {log=()=>{}}={}) {
   const endpoint = path.join(runtime, 'control.sock'), sockets = new Set();
   const server = net.createServer(socket => {
     sockets.add(socket); socket.setEncoding('utf8'); let buffer = '';const controller=new AbortController();
@@ -14,10 +14,11 @@ export async function serveLocal(runtime, service, shutdown) {
       while ((end = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
         void (async () => {
-          let request;
+          let request;const receivedAt=Date.now();
           try {
             request = JSON.parse(line);
-            const result = request.operation === 'stop' ? { stopping: true } : await service.execute({...request,signal:controller.signal});
+            const dispatchedAt=Date.now();const result = request.operation === 'stop' ? { stopping: true } : await service.execute({...request,signal:controller.signal});
+            if(!['status','inbox_queue_status','inbox_job'].includes(request.operation))log({event:'queue.control.completed',threadId:request.threadId,operation:request.operation,intentId:request.intentId,receivedAt,dispatchedAt,completedAt:Date.now()});
             if (!socket.destroyed) socket.write(JSON.stringify({ id: request.id, result }) + '\n');
             if (request.operation === 'stop') setTimeout(shutdown, 50);
           } catch (error) {

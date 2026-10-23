@@ -11,3 +11,16 @@ export class CatalogLive {
 export async function loadCatalog(api,route,{sleep=ms=>new Promise(r=>setTimeout(r,ms))}={}){
  for(let attempt=0;;attempt++)try{return await api(route,undefined,{timeoutMs:8000});}catch(error){if(error.code!=='network_unavailable'||attempt>=2)throw error;await sleep(1000*(attempt+1));}
 }
+
+// Bootstrap retries only initialization reads. It never logs in, submits a
+// phone message, or reloads an already-open conversation/draft.
+export class CatalogBootstrap {
+ constructor({initialize,onError,schedule=(fn,ms)=>globalThis.setTimeout(fn,ms),cancel=id=>globalThis.clearTimeout(id)}){Object.assign(this,{initialize,onError,schedule,cancel});}
+ connect(){
+  if(this.pending)return this.pending;this.cancel(this.timer);
+  this.pending=Promise.resolve().then(()=>this.initialize()).then(()=>true).catch(error=>{
+   this.onError(error);if(error.code==='network_unavailable'&&!this.closed)this.timer=this.schedule(()=>void this.connect(),3000);return false;
+  }).finally(()=>{this.pending=null;});return this.pending;
+ }
+ stop(){this.closed=true;this.cancel(this.timer);}
+}

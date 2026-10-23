@@ -25,7 +25,7 @@ export class InboxService {
     this.standby.bind(session.sessionId,turnId);return session;
     });
   }
-  async execute(request){const notify=!['inbox_queue_status','inbox_job','inbox_checkpoint'].includes(request.operation),pending=this.dispatch(request);if(notify)this.onChange?.();try{return await pending;}finally{if(notify)this.onChange?.();}}
+  async execute(request){const startedAt=Date.now(),notify=!['inbox_queue_status','inbox_job','inbox_checkpoint'].includes(request.operation),pending=this.dispatch(request);if(['inbox_listen','inbox_progress','inbox_reply','inbox_close'].includes(request.operation))this.log({event:'queue.inbox.dispatched',threadId:request.threadId,operation:request.operation,intentId:request.intentId,startedAt,returnedAt:Date.now()});if(notify)this.onChange?.();try{return await pending;}finally{if(notify)this.onChange?.();}}
   async dispatch(request){
     if(this.stopped)throw failure('queue_stopped');
     if(request.threadId!==this.scope.callerThreadId)throw failure('queue_scope_rejected');

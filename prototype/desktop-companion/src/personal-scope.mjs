@@ -15,9 +15,26 @@ export class PersonalScope {
   if(manifest.discovery!==undefined&&manifest.discovery!=='local-projects')reject('personal_scope_required');
   Object.assign(this,{manifest,desktopStateFile,metadataDatabase});this.refresh();
  }
- refresh(){if(this.manifest.discovery==='local-projects'){const s=discoverPersonal(this);this.projects=new Map(s.projects.map(p=>[p.id,p]));this.chats=new Map(s.chats.map(c=>[c.id,c]));}return this;}
+ // Explicit discovery still scans everything. Admission reuses only identical
+ // source files/WAL; the exact native row, archive and cwd are checked below.
+ sourceStamp(){return JSON.stringify([this.desktopStateFile,this.metadataDatabase,this.metadataDatabase+'-wal'].map(file=>{try{const s=fs.statSync(file,{bigint:true});return [String(s.dev),String(s.ino),String(s.size),String(s.mtimeNs),String(s.ctimeNs)];}catch(error){if(error.code==='ENOENT')return null;throw error;}}));}
+ refresh({force=true}={}){if(this.manifest.discovery==='local-projects'){
+  const before=this.sourceStamp();if(!force&&before===this.catalogStamp)return this;
+  const s=discoverPersonal(this);if(before!==this.sourceStamp())reject('desktop_catalog_changing');
+  this.projects=new Map(s.projects.map(p=>[p.id,p]));this.chats=new Map(s.chats.map(c=>[c.id,c]));this.catalogStamp=before;this.chatStamps=new Map();
+ }return this;}
+
  check(id,{write=false}={}){
-  this.refresh();
+  if(this.manifest.discovery==='local-projects'){
+   const stamp=this.sourceStamp();if(stamp!==this.catalogStamp&&this.chatStamps?.get(id)!==stamp){
+    // Other active chats update the shared WAL continuously. Check only this
+    // exact chat against current project metadata; periodic discovery still
+    // replaces the complete catalog. Never reuse a time-based auth cache.
+    const value=discoverPersonal({...this,conversationId:id});if(stamp!==this.sourceStamp())reject('desktop_catalog_changing');
+    const current=value.chats.find(c=>c.id===id);if(!current){this.chats.delete(id);reject('personal_scope_rejected');}
+    this.projects=new Map(value.projects.map(p=>[p.id,p]));this.chats.set(id,current);this.chatStamps??=new Map();this.chatStamps.set(id,stamp);
+   }
+  }else this.refresh({force:false});
   const chat=this.chats.get(id);if(!chat)reject('personal_scope_rejected');
   const dynamic=this.manifest.discovery==='local-projects',project=dynamic?this.projects.get(chat.projectId):desktopProjects(this.desktopStateFile).find(p=>p.id===chat.projectId);
   if(!dynamic&&!project?.threadIds.includes(id)&&!chat.acceptanceOnly)reject('personal_membership_changed');
