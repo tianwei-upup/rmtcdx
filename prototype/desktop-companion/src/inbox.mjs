@@ -166,9 +166,12 @@ export class OwnerInbox {
       const next = this.get(intentId); this.event('job.unknown_abandoned', next, reason); this.finishSession(row.session_id); return this.receipt(next);
     });
   }
-  recover() { return this.transaction(() => {
-    const rows = this.db.prepare("SELECT * FROM jobs WHERE state='leased'").all();
-    this.db.prepare("UPDATE jobs SET state='unknown',revision=revision+1 WHERE state='leased'").run();
+  recover({preserveNative=false}={}) { return this.transaction(() => {
+    const native=Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_dispatch'").get());
+    if(native&&!preserveNative&&this.db.prepare("SELECT 1 FROM jobs j JOIN native_dispatch d ON j.intent_id=d.intent_id WHERE j.state IN ('leased','unknown')").get())throw failure('inbox_native_delivery_required');
+    const where="state='leased'"+(native&&preserveNative?" AND intent_id NOT IN (SELECT intent_id FROM native_dispatch)":"");
+    const rows = this.db.prepare('SELECT * FROM jobs WHERE '+where).all();
+    this.db.prepare("UPDATE jobs SET state='unknown',revision=revision+1 WHERE "+where).run();
     for (const row of rows) this.event('job.unknown', this.get(row.intent_id), 'service_recovery');
     this.db.exec("UPDATE consumers SET state='closed',waiting=0,reason='service_recovery' WHERE state IN ('active','stopping')");
     return rows.length;

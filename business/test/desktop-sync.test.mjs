@@ -49,3 +49,12 @@ test('offline reset deduplication never hides a new disconnect after recovery at
  const reset=()=>source.onmessage({data:JSON.stringify({type:'desktop.reset',epoch:'epoch',revision:1,available:false,reason:'desktop_disconnected'})});
  try{reset();await new Promise(r=>setImmediate(r));available=true;await live.refresh();assert(live.state.available);available=false;reset();assert.equal(observations.at(-1),false);await new Promise(r=>setImmediate(r));assert.equal(live.state.available,false);}finally{live.close();}
 });
+test('direct user identity places a single phone bubble and keeps genuine native output',async()=>{
+ const {mergeDesktopQueue}=await import('../web/desktop-merge.mjs');const receipt={intentId:'p',state:'leased',consumerTurnId:'t'};
+ const user={id:'u',kind:'user',turnId:'t',text:'same body',queueLinks:[{intentId:'p',phase:'received'}]},reply={id:'a',kind:'assistant',turnId:'t',text:'real native delta'};
+ const merged=mergeDesktopQueue([user,reply],[receipt]);assert.equal(merged.length,2);assert.equal(merged[0].native,true);assert.equal(merged[0].hasNativeReply,true);assert.deepEqual(merged[1],reply);
+ const noProof=mergeDesktopQueue([{...user,queueLinks:undefined},reply],[receipt]);assert.equal(noProof.length,3);
+});
+test('native admission cannot present an unsupported stop action as available',async()=>{
+ const {QueueState}=await import('../web/queue-state.mjs');const state=new QueueState();state.nativeDirect=true;assert(state.canCancel({state:'queued'}));assert(!state.canCancel({state:'leased'}));state.nativeDirect=false;assert(state.canCancel({state:'leased'}));
+});

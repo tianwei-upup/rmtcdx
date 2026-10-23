@@ -6,8 +6,8 @@ import { readPrivate, writePrivate, privateDirectory } from './state.mjs';
 
 // A separate observer process; closing it never stops a queue worker or owner.
 export class DesktopPublisher {
-  constructor({chats,runtime,endpoint,call,lazy=false,isAllowed=()=>true,prepareHistory,log=()=>{},streamFactory=options=>new DesktopStream(options)}){
-    Object.assign(this,{chats,runtime,endpoint,call,lazy,isAllowed,prepareHistory,log,streamFactory});privateDirectory(runtime);this.epoch=crypto.randomUUID();this.entries=new Map();this.stopped=false;
+  constructor({chats,runtime,endpoint,call,lazy=false,isAllowed=()=>true,prepareHistory,nativeLinks=()=>new Map(),capabilities=()=>({}),log=()=>{},streamFactory=options=>new DesktopStream(options)}){
+    Object.assign(this,{chats,runtime,endpoint,call,lazy,isAllowed,prepareHistory,nativeLinks,capabilities,log,streamFactory});privateDirectory(runtime);this.epoch=crypto.randomUUID();this.entries=new Map();this.stopped=false;
   }
   async start(){
     for(let attempt=0;;attempt++){try{await this.hello();break;}catch(e){if(e.code!=='desktop_publisher_busy'||attempt>=4)throw e;await new Promise(r=>setTimeout(r,2500));}}
@@ -35,7 +35,7 @@ export class DesktopPublisher {
   dirty(e){if(this.stopped||!e||this.entries.get(e.chat.id)!==e)return;e.dirty=true;if(!e.sending){clearTimeout(e.timer);e.timer=setTimeout(()=>void this.flush(e),40);}}
   async flush(e){
     if(e.sending||this.stopped||this.entries.get(e.chat.id)!==e)return;e.sending=true;
-    try{while(e.dirty&&!this.stopped){e.dirty=false;const view=desktopView(e.stream,{approvalLedger:e.approvals.ledger});view.capabilities={...view.capabilities,...(e.chat.mobileReceive===true?{mobileReceive:true}:{}),...(e.chat.archived===true?{archived:true}:{}),...e.stream.capabilities};if(!e.chat.approvals||e.stream.capabilities?.archived)for(const a of view.approvals)a.canRespond=false;const hash=JSON.stringify(view);if(e.hash===hash)continue;await this.call('/api/agent/desktop/projection',{publisherEpoch:this.epoch,view});e.hash=hash;}}
+    try{while(e.dirty&&!this.stopped){e.dirty=false;const view=desktopView(e.stream,{approvalLedger:e.approvals.ledger,nativeLinks:this.nativeLinks(e.chat)});view.capabilities={...view.capabilities,...(e.chat.mobileReceive===true?{mobileReceive:true}:{}),...(e.chat.archived===true?{archived:true}:{}),...e.stream.capabilities,...(e.chat.nativeDirect===true?{nativeDirect:true}:{}),...this.capabilities(e.chat)};if(!e.chat.approvals||e.stream.capabilities?.archived)for(const a of view.approvals)a.canRespond=false;const hash=JSON.stringify(view);if(e.hash===hash)continue;await this.call('/api/agent/desktop/projection',{publisherEpoch:this.epoch,view});e.hash=hash;}}
     catch(error){e.dirty=true;this.error(error,e.chat.id);if(error.status>=400&&error.status<500&&![401,403,409].includes(error.status)){e.stream.invalidate(error.code??'desktop_projection_failed');e.retryAfter=Date.now()+30000;}}
     finally{e.sending=false;if(e.dirty&&!this.stopped)e.timer=setTimeout(()=>void this.flush(e),1000);}
   }

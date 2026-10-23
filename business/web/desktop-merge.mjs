@@ -9,7 +9,7 @@ export function mergeDesktopQueue(items,receipts){
     while(unlinked.length&&item.at!=null&&(unlinked[0].timing?.enqueuedAt??0)<=item.at)place(unlinked.shift());
     const links=(item.queueLinks??[]).filter(l=>pending.has(l.intentId));
     for(const link of links)if(!placed.has(link.intentId)){
-      list.push({kind:'queue',id:'queue:'+link.intentId,receipt:pending.get(link.intentId),turnId:item.turnId,correlated:true});placed.add(link.intentId);
+      list.push({kind:'queue',id:'queue:'+link.intentId,receipt:pending.get(link.intentId),turnId:item.turnId,correlated:true,...(item.kind==='user'?{native:true,hasNativeReply:items.some(i=>i.kind==='assistant'&&i.turnId===item.turnId&&i.text)}:{})});placed.add(link.intentId);
     }
     // Only suppress a queue transport row if its jobs are represented. Other
     // native tools, commentary and uncorrelated history are always retained.

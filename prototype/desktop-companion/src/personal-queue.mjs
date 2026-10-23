@@ -8,7 +8,7 @@ import {InboxService} from './inbox-service.mjs';
 import {readPrivate,writePrivate,privateDirectory} from './state.mjs';
 
 export class PersonalQueue {
- constructor({scope,grant,log=()=>{}}){this.scope=scope;this.grant=queueTestScope(grant);if(this.grant.mode!=='personal-projects')fail('personal_scope_required');this.chats=queueChats(this.grant);this.runtime=scope.manifest.runtime;privateDirectory(this.runtime);this.queues=new Map();this.events=new EventEmitter();this.log=log;this.stopped=false;
+ constructor({scope,grant,log=()=>{},inboxFactory=options=>new InboxService(options)}){this.scope=scope;this.grant=queueTestScope(grant);if(this.grant.mode!=='personal-projects')fail('personal_scope_required');this.chats=queueChats(this.grant);this.runtime=scope.manifest.runtime;privateDirectory(this.runtime);this.queues=new Map();this.events=new EventEmitter();this.log=log;this.stopped=false;this.inboxFactory=inboxFactory;
   // Resume only this service's existing inboxes. Never construct/recover the
   // legacy RN inboxes or allocate hundreds of empty SQLite databases.
   for(const c of this.chats)if(fs.existsSync(path.join(this.runtime,c.id,'inbox.sqlite')))this.queue(c.id);
@@ -17,9 +17,9 @@ export class PersonalQueue {
  eligible(id){const chat=this.scope.check(id,{write:true}),file=path.join(this.runtime,id,'context.json'),old=readPrivate(file,null);if(chat.binding&&old?.binding&&old.binding!==chat.binding){const q=this.queues.get(id)?.status();if(this.queues.get(id)?.inbox.receipts().some(r=>['queued','leased','unknown'].includes(r.state))||['active','stopping'].includes(q?.consumer?.state))fail('personal_context_changed_pending');}if(chat.binding&&old?.binding!==chat.binding){privateDirectory(path.dirname(file));writePrivate(file,{binding:chat.binding});}return chat;}
  members(){if(this.scope.manifest.discovery==='local-projects'){this.scope.refresh();return new Set(this.chats.filter(c=>this.scope.chats.get(c.id)?.projectId===c.projectId).map(c=>c.id));}const ps=desktopProjects(this.scope.desktopStateFile);return new Set(this.chats.filter(c=>ps.find(p=>p.id===c.projectId)?.threadIds.includes(c.id)).map(c=>c.id));}
  catalog(){const ids=this.members();return this.chats.filter(c=>ids.has(c.id)).map(c=>({id:c.id,projectId:c.projectId,title:c.title,status:'idle'}));}
- queue(id){if(!this.chats.some(c=>c.id===id))fail('personal_scope_rejected');if(!this.queues.has(id))this.queues.set(id,new InboxService({runtime:path.join(this.runtime,id),threadId:id,log:this.log,onChange:()=>this.events.emit('change',id)}));return this.queues.get(id);}
+ queue(id){if(!this.chats.some(c=>c.id===id))fail('personal_scope_rejected');if(!this.queues.has(id))this.queues.set(id,this.inboxFactory({runtime:path.join(this.runtime,id),threadId:id,log:this.log,onChange:()=>this.events.emit('change',id)}));return this.queues.get(id);}
  async execute(request){
-  if(this.stopped)fail('queue_stopped');
+  if(this.stopped||this.accepting===false)fail('queue_stopped');
   if(request.operation==='status'&&!request.threadId)return{mode:'personal-projects',ready:true,protocolVersion:2,allowedThreadIds:this.catalog().map(c=>c.id)};
   if(!this.chats.some(c=>c.id===request.threadId))fail('personal_scope_rejected');
   const write=['inbox_enqueue','inbox_open','inbox_listen','inbox_take','inbox_checkpoint','inbox_progress'].includes(request.operation);this.scope.check(request.threadId,{write});if(write)this.eligible(request.threadId);
@@ -31,6 +31,7 @@ export class PersonalQueue {
  }
  async snapshotQueue(id){this.scope.check(id);if(!this.queues.has(id))return{conversationId:id,receipts:[],consumer:null};return{...await this.execute({threadId:id,operation:'inbox_queue_status'}),conversationId:id};}
  subscribeQueue(fn){this.events.on('change',fn);return()=>this.events.off('change',fn);}
+ quiesce(){this.accepting=false;}
  stop(){this.stopped=true;for(const q of this.queues.values())q.stop();}
 }
 export class PersonalQueueAdapter {

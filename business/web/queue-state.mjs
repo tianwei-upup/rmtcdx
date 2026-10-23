@@ -13,5 +13,5 @@ export class QueueState {
   removeLocal(intentId) { if(this.items.get(intentId)?.local)this.items.delete(intentId); }
   list() { return [...this.items.values()].sort((a,b)=>(a.timing?.enqueuedAt??0)-(b.timing?.enqueuedAt??0)); }
   label(r) { return r.resolution==='abandoned_unknown' ? '结果未知 · 已停止跟进' : r.cancelRequested && r.state==='leased' ? '等待取消确认' : labels[r.state] || r.state; }
-  canCancel(r) { return ['queued','leased'].includes(r.state) && !r.cancelRequested; }
+  canCancel(r) { return ['queued','leased'].includes(r.state) && !r.cancelRequested && !(this.nativeDirect&&r.state==='leased'); }
 }

@@ -29,3 +29,11 @@ test('lost native acknowledgement blocks without wake or a changed activation id
   f.state('accepted'); await f.receiver.tick(); assert.equal(f.events.at(-1).state, 'awaiting_consumer'); assert.equal(f.wakes.length, 1);
   await f.receiver.tick(); assert.equal(f.wakes.length, 1);
 });
+test('a direct Inbox is never activated by the legacy pull receiver',async()=>{
+ const f=fixture();f.snapshot({deliveryMode:'native',receipts:[job],consumer:null});await f.receiver.tick();assert.equal(f.writes.length,0);assert.equal(f.wakes.length,0);assert.equal(f.events.at(-1).deliveryMode,'native');
+});
+test('a migration that wins while a legacy snapshot is pending fences the old activation',async()=>{
+ const writes=[];let release,allowed=true;const snapshot=new Promise(r=>{release=r;});
+ const receiver=new HistoryReceiver({conversationId:'original-id',readQueue:()=>snapshot,nativeQueue:{enqueue:r=>writes.push(r)},wake:()=>{},isLegacyAllowed:()=>allowed});
+ const pending=receiver.tick();allowed=false;release({receipts:[job],consumer:null});await pending;assert.equal(writes.length,0);
+});

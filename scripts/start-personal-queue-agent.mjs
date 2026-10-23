@@ -18,10 +18,14 @@ import {personalActivation,personalActivationV2,personalActivationV3,personalAct
 import {HistoryInboxReader} from '../prototype/desktop-companion/src/history-inbox-reader.mjs';
 import {acquireOwner,readPrivate,writePrivate} from '../prototype/desktop-companion/src/state.mjs';
 import {serveLocal} from '../prototype/desktop-companion/src/local-server.mjs';
+import {NativeDeliveryManager} from '../prototype/desktop-companion/src/native-delivery.mjs';
 const config=readPrivate(path.resolve(process.argv[2]),null),scope=new PersonalScope(readPrivate(config.scopeFile,null)),initialGrant=queueTestScope(config.grant),base=readPrivate(config.connectionFile,null),runtime=scope.manifest.runtime;
 let grant=scope.manifest.discovery==='local-projects'?queueTestScope(personalGrant(scope,initialGrant.deviceId)):initialGrant;
 if(grant.mode!=='personal-projects'||grant.projects.some(p=>p.conversations.some(c=>scope.route(c.id)!==runtime||scope.chats.get(c.id)?.projectId!==p.id))||!base.origin.startsWith('https://'))throw Error('personal_scope_required');
-const release=acquireOwner(runtime),log=e=>console.log(JSON.stringify(e)),queue=new PersonalQueue({scope,grant,log}),abort=new AbortController(),exec=promisify(execFile),readers=new Map(),receivers=new Map();let closeLocal,agent,publisher,timer,discoveryTimer,catalogCall,catalogRevision,catalogSync,unsubscribeQueue,receiveTimer,ticking=false,stopping=false;
+const release=acquireOwner(runtime),log=e=>console.log(JSON.stringify(e));
+function deliveryProjects(){const p=readPrivate(config.nativeDelivery.policyFile,null);if(p?.version!==1||p.enabled!==true||typeof p.allProjects!=='boolean'||!Array.isArray(p.projectIds)||p.projectIds.length>100||p.projectIds.some(id=>typeof id!=='string'))throw Error('native_delivery_policy_required');return p.allProjects?undefined:p.projectIds;}
+const nativeDelivery=config.nativeDelivery?.enabled===true?new NativeDeliveryManager({scope,queueRuntime:runtime,enabled:true,projectIds:deliveryProjects(),log}):null;
+const queue=new PersonalQueue({scope,grant,log,...(nativeDelivery?{inboxFactory:o=>nativeDelivery.createInbox(o)}:{})}),abort=new AbortController(),exec=promisify(execFile),readers=new Map(),receivers=new Map();let closeLocal,agent,publisher,timer,discoveryTimer,catalogCall,catalogRevision,catalogSync,unsubscribeQueue,receiveTimer,ticking=false,stopping=false;
 const callAdmin=async(route,data,cookie)=>{const r=await fetch(base.origin+route,{method:data===undefined?'GET':'POST',headers:{origin:base.origin,'content-type':'application/json',...(cookie?{cookie}:{})},body:data===undefined?undefined:JSON.stringify(data),signal:AbortSignal.timeout(15000)});if(!r.ok)throw Error('personal_catalog_request_'+r.status);return r;};
 function activationText(id,activation){const dir=path.join(runtime,'receipts',id),marker=path.join(dir,activation+'.protocol.json'),old=readPrivate(marker,null);if(old?.version===4)return personalActivationV4(activation);if(old?.version===3)return personalActivationV3(activation);if(old?.version===2)return personalActivationV2(activation);if(fs.existsSync(path.join(dir,activation+'.json')))return personalActivation(activation);writePrivate(marker,{version:4});return personalActivationV4(activation);}
 const desktopChats=()=>queueChats(grant).map(c=>({...c,cwd:scope.chats.get(c.id).cwd,approvals:!c.archived&&c.workspaceAvailable!==false,mobileReceive:!c.archived&&c.workspaceAvailable!==false}));
@@ -44,9 +48,10 @@ function receiverUnavailable(id,error){
 }
 async function receive(id){
  queue.eligible(id);
+ if(nativeDelivery?.handles(id)){await nativeDelivery.tick();return;}
  if(!receivers.has(id)){
   const reader=new HistoryInboxReader({database:path.join(runtime,id,'inbox.sqlite'),conversationId:id});readers.set(id,reader);
-  receivers.set(id,new HistoryReceiver({conversationId:id,nativeQueue:new NativeHistoryQueue({database:path.join(path.dirname(scope.metadataDatabase),'queue_1.sqlite'),runtime:path.join(runtime,'receipts',id),conversationId:id,personalScope:scope,enabled:true}),readQueue:async()=>reader.snapshot(),promptFactory:activation=>activationText(id,activation),
+  receivers.set(id,new HistoryReceiver({conversationId:id,nativeQueue:new NativeHistoryQueue({database:path.join(path.dirname(scope.metadataDatabase),'queue_1.sqlite'),runtime:path.join(runtime,'receipts',id),conversationId:id,personalScope:scope,enabled:true}),readQueue:async()=>reader.snapshot(),promptFactory:activation=>activationText(id,activation),isLegacyAllowed:()=>!nativeDelivery?.handles(id),
    wake:async chat=>{await checkDesktop();queue.eligible(chat);await exec('/usr/bin/open',['-g','-a','/Applications/ChatGPT.app','codex://threads/'+chat],{timeout:5000});},
    publish:value=>{const file=path.join(runtime,id,'receiver.json'),old=readPrivate(file,null);if(JSON.stringify(old?.value)!==JSON.stringify(value)){writePrivate(file,{value,at:Date.now()});log({at:new Date().toISOString(),event:'personal.receiver',conversationId:id,...value});}}
   }));
@@ -54,8 +59,9 @@ async function receive(id){
  await receivers.get(id).tick();
  if(receiverErrors.delete(id))log({at:new Date().toISOString(),event:'personal.receiver.recovered',conversationId:id});
 }
-async function tick(){if(stopping||ticking)return;ticking=true;try{await runReceiverTick({checkDesktop,ids:queue.queues.keys(),receive,unavailable:receiverUnavailable});}finally{ticking=false;}}
-async function stop(){if(stopping)return;stopping=true;clearInterval(timer);clearInterval(discoveryTimer);clearTimeout(receiveTimer);unsubscribeQueue?.();catalogSync?.stop();abort.abort();await Promise.allSettled([publisher?.stop(),agent?.stop(),...Array.from(receivers.values(),r=>r.pending)]);for(const r of readers.values())r.close();queue.stop();await closeLocal?.();release();}
+let policyErrorAt=0;
+async function tick(){if(stopping||ticking)return;ticking=true;try{if(nativeDelivery){try{nativeDelivery.setProjects(deliveryProjects());}catch(error){if(Date.now()-policyErrorAt>10000){policyErrorAt=Date.now();log({event:'native.delivery.policy_rejected',code:error.code??'native_delivery_policy_required'});}}await nativeDelivery.tick();}await runReceiverTick({checkDesktop,ids:queue.queues.keys(),receive,unavailable:receiverUnavailable});}catch(error){log({event:'personal.receiver.dispatch_failed',code:error.code??'receiver_unavailable'});}finally{ticking=false;}}
+async function stop(){if(stopping)return;stopping=true;clearInterval(timer);clearInterval(discoveryTimer);clearTimeout(receiveTimer);unsubscribeQueue?.();catalogSync?.stop();queue.quiesce();const stoppingAgent=agent?.stop();stoppingAgent?.catch(()=>{});abort.abort();await Promise.allSettled(Array.from(receivers.values(),r=>r.pending));await nativeDelivery?.stop();await Promise.allSettled([publisher?.stop(),stoppingAgent]);for(const r of readers.values())r.close();queue.stop();await closeLocal?.();release();}
 try{
  closeLocal=await serveLocal(runtime,queue,()=>void stop().then(()=>process.exit(0)),{log});
  const login=await callAdmin('/api/login',{username:'admin',password:base.password}),cookie=login.headers.get('set-cookie').split(';')[0];
@@ -65,9 +71,9 @@ try{
  agent=await startAgent({origin:base.origin,deviceId:grant.deviceId,stateFile,pairCode,adapter:new PersonalQueueAdapter(queue),queueTestScope:grant,realtime:true});
  const state=readPrivate(stateFile,null),call=async(route,data,timeout=15000)=>{const r=await fetch(base.origin+route,{method:'POST',headers:{'content-type':'application/json','x-device-id':grant.deviceId,authorization:'Bearer '+state.token},body:JSON.stringify(data),signal:AbortSignal.any([abort.signal,AbortSignal.timeout(timeout)])});const result=await r.json();if(!r.ok)throw Object.assign(Error(result.code),{code:result.code,status:r.status});return result;};
  const history=new RolloutHistory(scope),chats=desktopChats();
- publisher=await new DesktopPublisher({chats,runtime:path.join(runtime,'desktop'),endpoint:'/Users/liutianwei/.codex/ipc/ipc.sock',lazy:true,call,log,isAllowed:c=>{try{scope.check(c.id);return true;}catch{return false;}},streamFactory:o=>new ScopedHistoryStream({...o,scope,history})}).start();
+ publisher=await new DesktopPublisher({chats,runtime:path.join(runtime,'desktop'),endpoint:'/Users/liutianwei/.codex/ipc/ipc.sock',lazy:true,call,log,...(nativeDelivery?{nativeLinks:c=>nativeDelivery.nativeLinks(c),capabilities:c=>nativeDelivery.capabilities(c)}:{}),isAllowed:c=>{try{scope.check(c.id);return true;}catch{return false;}},streamFactory:o=>new ScopedHistoryStream({...o,scope,history})}).start();
  publisher.catalogMembership=desktopMembership(chats);
- const changed=new Set();unsubscribeQueue=queue.subscribeQueue(id=>{if(stopping)return;changed.add(id);if(receiveTimer)return;receiveTimer=setTimeout(()=>{receiveTimer=null;const ids=[...changed];changed.clear();void runReceiverTick({checkDesktop,ids,receive,unavailable:receiverUnavailable}).catch(e=>log({at:new Date().toISOString(),event:'personal.receiver.dispatch_failed',code:e.code??'receiver_unavailable'}));},25);});
+ const changed=new Set();unsubscribeQueue=queue.subscribeQueue(id=>{if(stopping)return;if(nativeDelivery&&publisher.entries.has(id))publisher.dirty(publisher.entries.get(id));changed.add(id);if(receiveTimer)return;receiveTimer=setTimeout(()=>{receiveTimer=null;const ids=[...changed];changed.clear();void runReceiverTick({checkDesktop,ids,receive,unavailable:receiverUnavailable}).catch(e=>log({at:new Date().toISOString(),event:'personal.receiver.dispatch_failed',code:e.code??'receiver_unavailable'}));},25);});
  if(grant.autoDiscover)discoveryTimer=setInterval(()=>void discover(),2000);
  timer=setInterval(()=>void tick(),1000);await tick();writePrivate(path.join(runtime,'worker.json'),{pid:process.pid,deviceId:grant.deviceId,projects:grant.projects.length,chats:chats.length,startedAt:new Date().toISOString()});log({event:'personal.queue.ready',projects:grant.projects.length,chats:chats.length});
  for(const s of ['SIGTERM','SIGINT'])process.once(s,()=>void stop().then(()=>process.exit(0)));

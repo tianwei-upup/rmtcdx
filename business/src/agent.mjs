@@ -93,11 +93,17 @@ export async function startAgent(config) {
     while (!stopped) {
       try {
         const { task } = await call('/api/agent/tasks/claim', { accepts:lane });
-        if (!task || stopped) continue;
+        if (!task) continue;
         active.set(task.id,task);current=task;
         await call(`/api/agent/tasks/${task.id}/ack`, { leaseToken: task.leaseToken });
         let receipt = store.data.receipts[task.id];
-        if (!receipt) {
+        if (!receipt && stopped) {
+          // A claim/ACK already in flight can finish after shutdown starts.
+          // Its body has not executed: preserve a known rejection instead of
+          // dropping the lease or entering the quiesced adapter as unknown.
+          receipt = { fingerprint: task.fingerprint, state: 'rejected', code: 'precondition_rejected' };
+          store.data.receipts[task.id] = receipt; store.save();
+        } else if (!receipt) {
           // Persist BEFORE native side effects. An unknown receipt never executes again.
           receipt = { fingerprint: task.fingerprint, state: 'unknown', code: 'execution_unknown', ...(remoteScope && task.operation==='queue.status'?{queueReadExpiresAt:Date.now()+600000}:{}) };
           store.data.receipts[task.id] = receipt; store.save();

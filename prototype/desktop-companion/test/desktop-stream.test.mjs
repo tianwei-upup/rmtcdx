@@ -60,3 +60,8 @@ test('queue correlations come from exact MCP identities and redact lease credent
  const o=observer();snapshot(o,{turns:[{turnId:'t',status:'completed',items:[{type:'mcpToolCall',id:'take',tool:'rmt_queue_listen',server:'test',arguments:{waitMs:10},result:{content:[{type:'text',text:JSON.stringify({status:'job',intentId:'job-a',leaseToken:'PRIVATE-LEASE',sessionId:'session'})}]}},{type:'mcpToolCall',id:'reply',tool:'rmt_queue_reply',server:'test',arguments:{intentId:'job-a',leaseToken:'PRIVATE-LEASE',result:'answer'},result:{structuredContent:{receipt:{intentId:'job-a'},next:{status:'job',intentId:'job-b',leaseToken:'PRIVATE-LEASE'}}}}]}],requests:[]});
  const v=desktopView(o);assert(!JSON.stringify(v).includes('PRIVATE-LEASE'));assert.deepEqual(v.items[0].queueLinks,[{intentId:'job-a',phase:'received'}]);assert.deepEqual(v.items[1].queueLinks,[{intentId:'job-a',phase:'reply'},{intentId:'job-b',phase:'received'}]);
 });
+test('direct body links require exact native client identity, including input still in params',()=>{
+ const o=observer();snapshot(o,{turns:[{turnId:'t',status:'inProgress',params:{clientUserMessageId:'client-a',input:[{type:'text',text:'hello'}]},items:[]}],requests:[]});
+ const nativeLinks=new Map([['client-a',{intentId:'phone-a',turnId:'t'}]]);assert.deepEqual(desktopView(o,{nativeLinks}).items[0].queueLinks,[{intentId:'phone-a',phase:'received'}]);
+ nativeLinks.set('client-a',{intentId:'phone-a',turnId:'different-turn'});assert.equal(desktopView(o,{nativeLinks}).items[0].queueLinks,undefined);
+});

@@ -1,4 +1,7 @@
-// Resident business queue only. No Codex process, desktop pipe or native sender.
+// Resident business queue; native body delivery requires its explicit scope policy.
+import {NativeDirectRuntime} from '../prototype/desktop-companion/src/native-direct-runtime.mjs';
+import {NativeDeliveryManager} from '../prototype/desktop-companion/src/native-delivery.mjs';
+import {PersonalScope} from '../prototype/desktop-companion/src/personal-scope.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -12,10 +15,13 @@ if(!['project-readonly','dedicated-test'].includes(grant?.mode))throw Error('exp
 const base=readPrivate(config.connectionFile,null);
 if(!base?.origin?.startsWith('https://'))throw Error('https_required');
 const release=acquireOwner(config.runtime);
-let queue,closeLocal,agent,stopping;
-async function stop(){if(stopping)return stopping;stopping=(async()=>{queue?.stop();await closeLocal?.();await agent?.stop();release();})();return stopping;}
+let queue,closeLocal,agent,stopping,native,nativeDelivery,deliveryTimer;
+function deliveryProjects(){const p=readPrivate(config.nativeDelivery.policyFile,null);if(p?.version!==1||p.enabled!==true||typeof p.allProjects!=='boolean'||!Array.isArray(p.projectIds)||p.projectIds.length>100||p.projectIds.some(id=>typeof id!=='string'))throw Error('native_delivery_policy_required');return p.allProjects?undefined:p.projectIds;}
+async function stop(){if(stopping)return stopping;stopping=(async()=>{clearInterval(deliveryTimer);queue?.quiesce();const stoppingAgent=agent?.stop();stoppingAgent?.catch(()=>{});await native?.stop();await nativeDelivery?.stop();await stoppingAgent;queue?.stop();await closeLocal?.();release();})();return stopping;}
 try{
-  queue=new ProjectQueue({runtime:config.runtime,grant,desktopStateFile:config.desktopStateFile,standby:config.standby,log:event=>console.log(JSON.stringify(event))});
+  if(config.nativeDirect){if(grant.mode!=='dedicated-test'||grant.conversationId!==config.nativeDirect.conversationId||config.standby)throw Error('native_direct_acceptance_only');native=new NativeDirectRuntime({...config.nativeDirect,log:event=>console.log(JSON.stringify(event))});}
+  if(config.nativeDelivery?.enabled===true){if(native||grant.mode!=='project-readonly')throw Error('native_delivery_scope_required');const scope=new PersonalScope(readPrivate(config.nativeDelivery.scopeFile,null));nativeDelivery=new NativeDeliveryManager({enabled:true,scope,queueRuntime:config.runtime,projectIds:deliveryProjects(),log:event=>console.log(JSON.stringify(event))});}
+  queue=new ProjectQueue({...(native?{inboxFactory:options=>native.createInbox(options)}:nativeDelivery?{inboxFactory:options=>nativeDelivery.createInbox(options)}:{}),runtime:config.runtime,grant,desktopStateFile:config.desktopStateFile,standby:nativeDelivery?undefined:config.standby,log:event=>console.log(JSON.stringify(event))});
   closeLocal=await serveLocal(config.runtime,queue,()=>void stop().then(()=>process.exit(0)));
   const login=await fetch(base.origin+'/api/login',{method:'POST',headers:{origin:base.origin,'content-type':'application/json'},body:JSON.stringify({username:'admin',password:base.password}),signal:AbortSignal.timeout(15000)});
   if(!login.ok)throw Error('business_login_failed');const cookie=login.headers.get('set-cookie').split(';')[0];
@@ -37,6 +43,8 @@ try{
   }
   if(!registered)throw Error('catalog_registration_timeout');
   writePrivate(path.join(config.runtime,'worker.json'),{pid:process.pid,deviceId:grant.deviceId,projectId:grant.projectId,startedAt:new Date().toISOString()});
+  native?.start();
+  if(nativeDelivery){await nativeDelivery.tick();deliveryTimer=setInterval(()=>{try{nativeDelivery.setProjects(deliveryProjects());void nativeDelivery.tick().catch(error=>console.log(JSON.stringify({event:'native.delivery.unavailable',code:error.code??'native_delivery_unavailable'})));}catch(error){console.log(JSON.stringify({event:'native.delivery.policy_rejected',code:error.code??'native_delivery_policy_required'}));}},200);}
   console.log(JSON.stringify({event:'project.queue.ready',projectId:grant.projectId,chats:queue.catalog().length}));
   for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>void stop().then(()=>process.exit(0)));
 }catch(error){await stop();throw error;}

@@ -18,8 +18,8 @@ export function activationReference(text) {
 // An on-demand receiver, not a model that polls forever. Busy native threads
 // receive only a durable queue append; only Codex decides when they are idle.
 export class HistoryReceiver {
-  constructor({ conversationId, nativeQueue, readQueue, wake, publish = () => {}, now = Date.now, promptFactory=activationPrompt }) {
-    Object.assign(this, { conversationId, nativeQueue, readQueue, wake, publish, now, promptFactory });
+  constructor({ conversationId, nativeQueue, readQueue, wake, publish = () => {}, now = Date.now, promptFactory=activationPrompt, isLegacyAllowed=()=>true }) {
+    Object.assign(this, { conversationId, nativeQueue, readQueue, wake, publish, now, promptFactory, isLegacyAllowed });
     this.wakes = new Map();
   }
   async tick() {
@@ -28,6 +28,7 @@ export class HistoryReceiver {
   }
   async run() {
     const q = await this.readQueue();
+    if(q.deliveryMode==='native'||!this.isLegacyAllowed())return this.publish({state:'receiving',deliveryMode:'native'});
     if ((q.receipts ?? []).some(r => r.state === 'unknown')) return this.publish({ state: 'blocked', code: 'existing_job_inflight_or_unknown' });
     if (['active', 'stopping'].includes(q.consumer?.state)) return this.publish({ state: 'receiving', consumerTurnId: q.consumer.consumerTurnId });
     if ((q.receipts ?? []).some(r => r.state === 'leased')) return this.publish({ state: 'blocked', code: 'existing_job_inflight_or_unknown' });

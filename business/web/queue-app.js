@@ -72,6 +72,7 @@ function createRow(id){
   rows.set(id,row);return row;
 }
 function render(){
+  state.nativeDirect=desktopHistory?.capabilities.nativeDirect===true;
   const list=state.list();$('empty').hidden=list.length>0||Boolean(desktopHistory?.itemCount);$('historyScope').hidden=!list.length||Boolean(desktopEnabled());$('queue').hidden=Boolean(desktopHistory?.itemCount);
   list.forEach((r,index)=>{
     const row=rows.get(r.intentId)??createRow(r.intentId);row.receipt=r;row.article.dataset.state=r.state;row.article.dataset.uncertain=String(Boolean(r.outcomeUncertain));

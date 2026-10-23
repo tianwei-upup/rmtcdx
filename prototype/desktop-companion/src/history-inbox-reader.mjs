@@ -18,7 +18,7 @@ export class HistoryInboxReader {
       const row = this.db.prepare('SELECT state,turn_id AS consumerTurnId,expires_at AS expiresAt FROM consumers ORDER BY rowid DESC LIMIT 1').get();
       const standby = this.hasStandby && this.db.prepare('SELECT enabled FROM standby_policy WHERE singleton=1').get()?.enabled === 1;
       const consumer = row && { ...row, state: row.state === 'active' && row.expiresAt <= this.now() && !standby ? 'closed' : row.state };
-      return { receipts, consumer };
+      return { receipts, consumer, ...(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_dispatch'").get()?{deliveryMode:'native'}:{}) };
     } finally { this.db.exec('ROLLBACK'); }
   }
   close() { this.db.close(); }

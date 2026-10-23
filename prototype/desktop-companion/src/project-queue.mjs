@@ -7,7 +7,7 @@ import { InboxService } from './inbox-service.mjs';
 import { privateDirectory } from './state.mjs';
 
 export class ProjectQueue {
-  constructor({runtime,grant,desktopStateFile,log=()=>{},standby}){
+  constructor({runtime,grant,desktopStateFile,log=()=>{},standby,inboxFactory=options=>new InboxService(options)}){
     this.events=new EventEmitter();this.grant=queueTestScope(grant);
     if(!['project-readonly','dedicated-test'].includes(this.grant?.mode))fail('queue_scope_rejected');
     this.chats=this.grant.conversations??[{id:this.grant.conversationId,title:'rmtcdx realtime acceptance',archived:false}];
@@ -17,7 +17,7 @@ export class ProjectQueue {
     try{for(const chat of this.chats){
       // ID is a directory component as well as an API identity.
       if(!/^[a-zA-Z0-9-]{1,80}$/.test(chat.id))fail('queue_scope_rejected');
-      this.queues.set(chat.id,new InboxService({runtime:path.join(runtime,chat.id),threadId:chat.id,log,onChange:()=>this.events.emit('change',chat.id),...(standby?.threadIds.includes(chat.id)?{standby:{windowMs:standby.windowMs,maxJobs:standby.maxJobs}}:{})}));
+      this.queues.set(chat.id,inboxFactory({runtime:path.join(runtime,chat.id),threadId:chat.id,log,onChange:()=>this.events.emit('change',chat.id),...(standby?.threadIds.includes(chat.id)?{standby:{windowMs:standby.windowMs,maxJobs:standby.maxJobs}}:{})}));
     }}catch(error){this.stop();throw error;}
   }
   members(){
@@ -29,7 +29,7 @@ export class ProjectQueue {
   allowed(threadId){const chat=this.chats.find(c=>c.id===threadId);if(!chat||!this.members().has(threadId))fail('queue_scope_rejected');return chat;}
   catalog(){const members=this.members();return this.chats.filter(c=>members.has(c.id)).map(c=>({id:c.id,projectId:this.grant.projectId,title:c.title,status:'idle'}));}
   async execute(request){
-    if(this.stopped)fail('queue_stopped');
+    if(this.stopped||this.accepting===false)fail('queue_stopped');
     if(request.operation==='status'&&!request.threadId)return {mode:this.grant.mode,projectId:this.grant.projectId,ready:true,protocolVersion:2,allowedThreadIds:this.catalog().map(c=>c.id)};
     const chat=this.allowed(request.threadId),queue=this.queues.get(chat.id);
     if(request.operation==='status')return {mode:this.grant.mode,projectId:this.grant.projectId,callerThreadId:chat.id,ready:true,ownerInbox:queue.status()};
@@ -41,6 +41,7 @@ export class ProjectQueue {
     return value;
   }
   subscribeQueue(listener){this.events.on('change',listener);return()=>this.events.off('change',listener);}
+  quiesce(){this.accepting=false;}
   async snapshotQueue(id){return {...await this.execute({operation:'inbox_queue_status',threadId:id}),conversationId:id};}
   stop(){if(this.stopped)return;this.stopped=true;for(const queue of this.queues.values())queue.stop();}
 }

@@ -35,7 +35,7 @@ export function nativeTurns(state){
   if(new Set(keys).size!==keys.length||keys.some(k=>!Object.hasOwn(history.entitiesByKey,k)))throw streamError('invalid_desktop_history');
   return {turns:keys.map(k=>({...history.entitiesByKey[k],entityKey:k})),complete:history.isComplete===true};
 }
-export function desktopView(stream,{approvalLedger=new Map()}={}){
+export function desktopView(stream,{approvalLedger=new Map(),nativeLinks=new Map()}={}){
   if(!stream.ready)return {conversationId:stream.conversationId,epoch:stream.epoch,revision:stream.revision,available:false,reason:stream.unavailable??'desktop_connecting',items:[],approvals:[],historyComplete:false};
   const {state}=stream,{turns,complete}=nativeTurns(state),items=[],unsupported=new Set();
   for(const [index,turn]of turns.entries()){
@@ -47,11 +47,14 @@ export function desktopView(stream,{approvalLedger=new Map()}={}){
     // Some native delegated turns have only a functionCallOutput; preserve it
     // as context/tool output, never invent a user message from an assistant.
     if(!nativeItems.some(i=>i.type==='userMessage')){
-      const prompt=text(turn.params?.input);if(prompt)items.push(userMessage({id:'input'},prompt));
+      const prompt=text(turn.params?.input),link=nativeLinks.get(turn.params?.clientUserMessageId);if(prompt)items.push(userMessage({id:'input'},prompt,link&&(!link.turnId||link.turnId===turnId)?{queueLinks:[{intentId:link.intentId,phase:'received'}]}:{}));
     }
     for(const item of nativeItems){
       if(item.type==='reasoning')continue;
-      if(item.type==='userMessage'||item.type==='steeringUserMessage')items.push(userMessage(item,text(item.content),{...(Array.isArray(item.content)&&item.content.some(c=>c.type!=='text')?{attachmentsUnavailable:true}:{})}));
+      if(item.type==='userMessage'||item.type==='steeringUserMessage'){
+        const link=nativeLinks.get(item.clientId??item.client_id);
+        items.push(userMessage(item,text(item.content),{...(Array.isArray(item.content)&&item.content.some(c=>c.type!=='text')?{attachmentsUnavailable:true}:{}),...(link&&(!link.turnId||link.turnId===turnId)?{queueLinks:[{intentId:link.intentId,phase:'received'}]}:{})}));
+      }
       else if(item.type==='agentMessage')items.push(message(item,'assistant',{text:item.text??'',phase:item.phase??null,status:turn.status==='inProgress'?'running':turn.status==='failed'||turn.status==='interrupted'?turn.status:'completed'}));
       else if(toolTypes.has(item.type)){
         const queue=queueMetadata(item);
